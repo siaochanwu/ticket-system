@@ -1,0 +1,18 @@
+# 依賴
+node_modules/
+
+# 環境變數
+.env
+.env.local
+
+# 編譯輸出
+dist/
+
+# 日誌
+*.log
+
+# 架構
+ARCHITECTURE.md
+
+# test
+test-redis.ts

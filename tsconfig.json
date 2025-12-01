@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "NodeNext",   //使用 Node.js 的 ES Module 系統
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,        //啟用嚴格型別檢查
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,     //產生 .map 檔，方便除錯
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
