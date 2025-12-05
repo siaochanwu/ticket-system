@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyError } from 'fastify';
+import fp from 'fastify-plugin';
 
 export class AppError extends Error {
     statusCode: number;
@@ -49,7 +50,7 @@ export const Errors = {
     INTERNAL_ERROR: new AppError('系統錯誤，請稍後再試', 500, 'INTERNAL_ERROR'),
 };
 
-export default async function errorHandlerPlugin(app: FastifyInstance) {
+async function errorHandlerPlugin(app: FastifyInstance) {
     // 全域錯誤處理
     app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
         // 記錄錯誤
@@ -103,3 +104,6 @@ export default async function errorHandlerPlugin(app: FastifyInstance) {
         });
     });
 }
+
+// 使用 fastify-plugin 包裝，讓錯誤處理器在所有 plugin 中都能生效
+export default fp(errorHandlerPlugin);

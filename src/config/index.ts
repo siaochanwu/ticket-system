@@ -1,9 +1,15 @@
 import 'dotenv/config';
+import { config as dotenvConfig } from 'dotenv';
+import path from 'path';
+
+const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env';
+dotenvConfig({ path: path.resolve(process.cwd(), envFile), override: true });
 
 export interface AppConfig {
     env: string;
     isDev: boolean;
     isProd: boolean;
+    isTest: boolean;
     server: {
         port: number;
         host: string;
@@ -29,6 +35,7 @@ export const config: AppConfig = {
     env: process.env.NODE_ENV || 'development',
     isDev: process.env.NODE_ENV === 'development',
     isProd: process.env.NODE_ENV === 'production',
+    isTest: process.env.NODE_ENV === 'test',
 
     // 伺服器
     server: {
