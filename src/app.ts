@@ -115,4 +115,7 @@ async function start() {
     process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-start();
+// 只在非測試環境下啟動伺服器
+if (process.env.NODE_ENV !== 'test') {
+    start();
+}

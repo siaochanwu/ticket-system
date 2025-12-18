@@ -65,7 +65,7 @@ export default async function eventsRoutes(app: FastifyInstance) {
     );
 
     app.get<{ Params: SessionParams }>(
-        '/session/:sessionId',
+        '/sessions/:sessionId',
         {
             schema: {
                 params: {
@@ -90,7 +90,7 @@ export default async function eventsRoutes(app: FastifyInstance) {
     );
 
     app.get<{ Params: SessionParams }>(
-        '/session/:sessionId/seats',
+        '/sessions/:sessionId/seats',
         {
             schema: {
                 params: {
@@ -148,7 +148,7 @@ export default async function eventsRoutes(app: FastifyInstance) {
             schema: {
                 body: {
                     type: 'object',
-                    required: ['title', 'saleStartAt'],
+                    required: ['title', 'saleStartAt', 'venue'],
                     properties: {
                         title: { type: 'string', minLength: 1 },
                         description: { type: 'string' },
@@ -344,6 +344,7 @@ export default async function eventsRoutes(app: FastifyInstance) {
 
             reply.status(201).send({
                 success: true,
+                data: result,
             });
         }
     );

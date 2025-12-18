@@ -20,7 +20,7 @@ model User {
   realName     String?   @map("real_name")
   idCard       String?   @map("id_card")
   isVerified   Boolean   @default(false) @map("is_verified")
-  role         String    @default("user")
+  role         String    @default("USER")
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
