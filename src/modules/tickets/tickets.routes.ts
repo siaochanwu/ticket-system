@@ -34,6 +34,7 @@ export default async function ticketsRoutes(app: FastifyInstance) {
             reply.send({
                 success: true,
                 message: '鎖定成功',
+                data: result,
             });
         }
     );

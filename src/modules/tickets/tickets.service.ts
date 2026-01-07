@@ -71,8 +71,8 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
         );
     }
 
-    // 3. 檢查購買上限
-    if (seatIds.length > seats[0].ticketType.maxPerOrder) {
+    // 3. 檢查購買上限 (在同一票種時檢查)
+    if (seats.length > 0 && seatIds.length > seats[0].ticketType.maxPerOrder) {
         throw Errors.EXCEED_LIMIT;
     }
 
@@ -180,7 +180,7 @@ export async function autoSelect(input: AutoSelectInput): Promise<LockResult> {
     });
 
     if (!ticketType || ticketType.sessionId !== sessionId) {
-        throw new AppError('票種不存在', 400, 'TICKET_TYPE_NOT_FOUND');
+        throw new AppError('票種不存在', 404, 'TICKET_TYPE_NOT_FOUND');
     }
 
     // 2. 檢查購買上限
@@ -256,7 +256,6 @@ function findConsecutiveSeats(
                 }
             }
             if (isConsecutive) {
-                console.log(rowName, rowSeats.slice(i, i + quantity));
                 return rowSeats.slice(i, i + quantity);
             }
         }
@@ -321,7 +320,7 @@ export async function getUserLocks(userId: string): Promise<UserLock[]> {
     const result: UserLock[] = [];
 
     for (const [lockId, data] of Object.entries(locks)) {
-        const { sessionId, seatIds, expiresAt } = JSON.parse(data);
+        const { sessionId, seatIds, expiresAt } = JSON.parse(data as string);
 
         // 檢查是否過期
         if (new Date(expiresAt) < new Date()) {

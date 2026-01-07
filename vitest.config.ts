@@ -17,5 +17,9 @@ export default defineConfig({
         },
         // 每個測試檔案的超時時間
         testTimeout: 10000,
+        // 禁用文件內並行執行
+        fileParallelism: false,
+        // 禁用測試內並行執行
+        maxConcurrency: 1,
     },
 });
