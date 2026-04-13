@@ -17,13 +17,33 @@ export default async function authRoutes(app: FastifyInstance) {
         '/register',
         {
             schema: {
+                tags: ['auth'],
+                summary: '用戶註冊',
+                description: '註冊新用戶帳號',
                 body: {
                     type: 'object',
                     required: ['email', 'password'],
                     properties: {
-                        email: { type: 'string', format: 'email' },
-                        password: { type: 'string' },
-                        phone: { type: 'string' },
+                        email: { type: 'string', format: 'email', description: '電子郵件' },
+                        password: { type: 'string', minLength: 8, description: '密碼（至少8個字元）' },
+                        phone: { type: 'string', description: '電話號碼（選填）' },
+                    },
+                },
+                response: {
+                    201: {
+                        type: 'object',
+                        properties: {
+                            success: { type: 'boolean' },
+                            message: { type: 'string' },
+                            data: {
+                                type: 'object',
+                                properties: {
+                                    id: { type: 'string' },
+                                    email: { type: 'string' },
+                                    role: { type: 'string' },
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -42,12 +62,38 @@ export default async function authRoutes(app: FastifyInstance) {
         '/login',
         {
             schema: {
+                tags: ['auth'],
+                summary: '用戶登入',
+                description: '使用帳號密碼登入系統',
                 body: {
                     type: 'object',
                     required: ['email', 'password'],
                     properties: {
-                        email: { type: 'string', format: 'email' },
-                        password: { type: 'string' },
+                        email: { type: 'string', format: 'email', description: '電子郵件' },
+                        password: { type: 'string', description: '密碼' },
+                    },
+                },
+                response: {
+                    200: {
+                        type: 'object',
+                        properties: {
+                            success: { type: 'boolean' },
+                            message: { type: 'string' },
+                            data: {
+                                type: 'object',
+                                properties: {
+                                    user: {
+                                        type: 'object',
+                                        properties: {
+                                            id: { type: 'string' },
+                                            email: { type: 'string' },
+                                            role: { type: 'string' },
+                                        },
+                                    },
+                                    token: { type: 'string', description: 'JWT Token' },
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -76,6 +122,28 @@ export default async function authRoutes(app: FastifyInstance) {
         '/me',
         {
             onRequest: [app.authenticate],
+            schema: {
+                tags: ['auth'],
+                summary: '取得當前用戶資訊',
+                description: '取得已登入用戶的個人資訊',
+                security: [{ Bearer: [] }],
+                response: {
+                    200: {
+                        type: 'object',
+                        properties: {
+                            success: { type: 'boolean' },
+                            data: {
+                                type: 'object',
+                                properties: {
+                                    id: { type: 'string' },
+                                    email: { type: 'string' },
+                                    role: { type: 'string' },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
         },
         async (request, reply) => {
             const { id } = request.user as { id: string };

@@ -16,17 +16,21 @@ export default async function eventsRoutes(app: FastifyInstance) {
         '/',
         {
             schema: {
+                tags: ['events'],
+                summary: '取得活動列表',
+                description: '取得所有活動的分頁列表',
                 querystring: {
                     type: 'object',
                     properties: {
-                        page: { type: 'integer', minimum: 1, default: 1 },
+                        page: { type: 'integer', minimum: 1, default: 1, description: '頁碼' },
                         limit: {
                             type: 'integer',
                             minimum: 1,
                             maximum: 50,
                             default: 10,
+                            description: '每頁數量',
                         },
-                        status: { type: 'string' },
+                        status: { type: 'string', description: '活動狀態（draft, published, ended）' },
                     },
                 },
             },
@@ -45,11 +49,14 @@ export default async function eventsRoutes(app: FastifyInstance) {
         '/:id',
         {
             schema: {
+                tags: ['events'],
+                summary: '取得活動詳情',
+                description: '根據 ID 取得單一活動的詳細資訊',
                 params: {
                     type: 'object',
                     required: ['id'],
                     properties: {
-                        id: { type: 'integer' },
+                        id: { type: 'integer', description: '活動 ID' },
                     },
                 },
             },

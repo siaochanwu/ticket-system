@@ -10,15 +10,20 @@ export default async function ticketsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticate],
             schema: {
+                tags: ['tickets'],
+                summary: '鎖定座位（手動選位）',
+                description: '鎖定指定的座位，防止其他用戶購買（鎖定時間約15分鐘）',
+                security: [{ Bearer: [] }],
                 body: {
                     type: 'object',
                     required: ['sessionId', 'seatIds'],
                     properties: {
-                        sessionId: { type: 'integer' },
+                        sessionId: { type: 'integer', description: '場次 ID' },
                         seatIds: {
                             type: 'array',
                             items: { type: 'integer' },
                             minItems: 1,
+                            description: '座位 ID 陣列',
                         },
                     },
                 },
@@ -45,13 +50,17 @@ export default async function ticketsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticate],
             schema: {
+                tags: ['tickets'],
+                summary: '自動選位',
+                description: '系統自動選擇連續座位並鎖定',
+                security: [{ Bearer: [] }],
                 body: {
                     type: 'object',
                     required: ['sessionId', 'ticketTypeId', 'quantity'],
                     properties: {
-                        sessionId: { type: 'integer' },
-                        ticketTypeId: { type: 'integer' },
-                        quantity: { type: 'integer', minimum: 1, maximum: 10 },
+                        sessionId: { type: 'integer', description: '場次 ID' },
+                        ticketTypeId: { type: 'integer', description: '票種 ID' },
+                        quantity: { type: 'integer', minimum: 1, maximum: 10, description: '票券數量' },
                     },
                 },
             },

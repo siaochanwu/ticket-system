@@ -1,6 +1,8 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 
 import config from './config/index.js';
 import prisma from './config/database.js';
@@ -40,6 +42,43 @@ export async function buildApp(): Promise<FastifyInstance> {
         sign: {
             expiresIn: config.jwt.expiresIn,
         },
+    });
+
+    // Swagger
+    await app.register(swagger, {
+        swagger: {
+            info: {
+                title: 'Ticket System API',
+                description: '活動售票系統 API 文件',
+                version: '1.0.0',
+            },
+            host: `localhost:${config.server.port}`,
+            schemes: ['http'],
+            consumes: ['application/json'],
+            produces: ['application/json'],
+            tags: [
+                { name: 'auth', description: '認證相關' },
+                { name: 'events', description: '活動相關' },
+                { name: 'tickets', description: '票券相關' },
+            ],
+            securityDefinitions: {
+                Bearer: {
+                    type: 'apiKey',
+                    name: 'Authorization',
+                    in: 'header',
+                    description: 'JWT Token (格式: Bearer <token>)',
+                },
+            },
+        },
+    });
+
+    await app.register(swaggerUi, {
+        routePrefix: '/docs',
+        uiConfig: {
+            docExpansion: 'list',
+            deepLinking: true,
+        },
+        staticCSP: true,
     });
 
     // 全域錯誤處理
