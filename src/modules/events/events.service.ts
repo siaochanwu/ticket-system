@@ -7,7 +7,7 @@ import {
     CreateSessionInput,
     CreateTicketTypeInput,
     CreateSeatsInput,
-} from './events.types.js';
+} from './events.type.js';
 
 // 取得活動列表
 export async function getEvents(options: GetEventOptions = {}) {

@@ -57,7 +57,7 @@ export async function login(input: LoginInput) {
     if (!user) {
         throw Errors.INVALID_CREDENTIALS;
     }
-    
+
     const isValid = await bcrypt.compare(password, user.passwordHash)
 
     if (!isValid) {
@@ -88,7 +88,7 @@ export async function getUserById(userId: string) {
         }
     })
 
-    if(!user) {
+    if (!user) {
         throw Errors.USER_NOT_FOUND;
     }
 

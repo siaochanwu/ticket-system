@@ -9,7 +9,7 @@ import {
     CreateSessionBody,
     CreateTicketTypeBody,
     CreateSeatsBody,
-} from './events.types.js';
+} from './events.type.js';
 
 export default async function eventsRoutes(app: FastifyInstance) {
     app.get<{ Querystring: GetEventsQuery }>(
