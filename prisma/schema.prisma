@@ -7,119 +7,51 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ========================================
+// UUID 主鍵（對外暴露）
+// ========================================
+
+// 使用者
 model User {
-  id             String          @id @default(uuid())
-  email          String          @unique
-  passwordHash   String          @map("password_hash")
-  phone          String?
-  realName       String?         @map("real_name")
-  idCard         String?         @map("id_card")
-  isVerified     Boolean         @default(false) @map("is_verified")
-  role           String          @default("user")
-  createdAt      DateTime        @default(now()) @map("created_at")
-  updatedAt      DateTime        @updatedAt @map("updated_at")
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  phone        String?
+  realName     String?   @map("real_name")
+  idCard       String?   @map("id_card")
+  isVerified   Boolean   @default(false) @map("is_verified")
+  role         String    @default("user")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
   orders         Order[]
   refundRequests RefundRequest[]
 
   @@map("users")
 }
 
-model Event {
+// 訂單
+model Order {
   id          String    @id @default(uuid())
-  title       String
-  description String?
-  venue       String?
-  coverImage  String?   @map("cover_image")
-  saleStartAt DateTime  @map("sale_start_at")
-  saleEndAt   DateTime? @map("sale_end_at")
-  status      String    @default("draft")
+  orderNo     String    @unique @map("order_no")
+  userId      String    @map("user_id")
+  sessionId   Int       @map("session_id")
+  status      String    @default("pending")
+  totalAmount Decimal   @map("total_amount") @db.Decimal(10, 2)
+  expiresAt   DateTime  @map("expires_at")
+  paidAt      DateTime? @map("paid_at")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
-  sessions    Session[]
 
-  @@map("events")
-}
-
-model Session {
-  id          String       @id @default(uuid())
-  eventId     String       @map("event_id")
-  sessionDate DateTime     @map("session_date") @db.Date
-  sessionTime String       @map("session_time")
-  status      String       @default("active")
-  createdAt   DateTime     @default(now()) @map("created_at")
-  orders      Order[]
-  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  ticketTypes TicketType[]
-
-  @@map("sessions")
-}
-
-model TicketType {
-  id               String      @id @default(uuid())
-  sessionId        String      @map("session_id")
-  name             String
-  price            Decimal     @db.Decimal(10, 2)
-  totalQuantity    Int         @map("total_quantity")
-  reservedQuantity Int         @default(0) @map("reserved_quantity")
-  maxPerOrder      Int         @default(4) @map("max_per_order")
-  createdAt        DateTime    @default(now()) @map("created_at")
-  orderItems       OrderItem[]
-  seats            Seat[]
-  session          Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-
-  @@map("ticket_types")
-}
-
-model Seat {
-  id           String      @id @default(uuid())
-  ticketTypeId String      @map("ticket_type_id")
-  rowName      String      @map("row_name")
-  seatNumber   String      @map("seat_number")
-  status       String      @default("available")
-  lockedUntil  DateTime?   @map("locked_until")
-  lockedBy     String?     @map("locked_by")
-  createdAt    DateTime    @default(now()) @map("created_at")
-  orderItems   OrderItem[]
-  ticketType   TicketType  @relation(fields: [ticketTypeId], references: [id], onDelete: Cascade)
-
-  @@map("seats")
-}
-
-model Order {
-  id          String      @id @default(uuid())
-  orderNo     String      @unique @map("order_no")
-  userId      String      @map("user_id")
-  sessionId   String      @map("session_id")
-  status      String      @default("pending")
-  totalAmount Decimal     @map("total_amount") @db.Decimal(10, 2)
-  expiresAt   DateTime    @map("expires_at")
-  paidAt      DateTime?   @map("paid_at")
-  createdAt   DateTime    @default(now()) @map("created_at")
-  updatedAt   DateTime    @updatedAt @map("updated_at")
-  items       OrderItem[]
-  session     Session     @relation(fields: [sessionId], references: [id])
-  user        User        @relation(fields: [userId], references: [id])
-  payments    Payment[]
+  user     User        @relation(fields: [userId], references: [id])
+  session  Session     @relation(fields: [sessionId], references: [id])
+  items    OrderItem[]
+  payments Payment[]
 
   @@map("orders")
 }
 
-model OrderItem {
-  id           String     @id @default(uuid())
-  orderId      String     @map("order_id")
-  seatId       String     @map("seat_id")
-  ticketTypeId String     @map("ticket_type_id")
-  price        Decimal    @db.Decimal(10, 2)
-  ticketCode   String?    @map("ticket_code")
-  qrCode       String?    @map("qr_code")
-  createdAt    DateTime   @default(now()) @map("created_at")
-  order        Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  seat         Seat       @relation(fields: [seatId], references: [id])
-  ticketType   TicketType @relation(fields: [ticketTypeId], references: [id])
-
-  @@map("order_items")
-}
-
+// 付款記錄
 model Payment {
   id            String   @id @default(uuid())
   orderId       String   @map("order_id")
@@ -130,11 +62,13 @@ model Payment {
   rawResponse   Json?    @map("raw_response")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
-  order         Order    @relation(fields: [orderId], references: [id])
+
+  order Order @relation(fields: [orderId], references: [id])
 
   @@map("payments")
 }
 
+// 退票申請
 model RefundRequest {
   id          String    @id @default(uuid())
   orderId     String    @map("order_id")
@@ -144,7 +78,99 @@ model RefundRequest {
   processedAt DateTime? @map("processed_at")
   processedBy String?   @map("processed_by")
   createdAt   DateTime  @default(now()) @map("created_at")
-  user        User      @relation(fields: [userId], references: [id])
+
+  user User @relation(fields: [userId], references: [id])
 
   @@map("refund_requests")
+}
+
+// ========================================
+// Int 主鍵（內部使用）
+// ========================================
+
+// 活動
+model Event {
+  id          Int       @id @default(autoincrement())
+  title       String
+  description String?
+  venue       String?
+  coverImage  String?   @map("cover_image")
+  saleStartAt DateTime  @map("sale_start_at")
+  saleEndAt   DateTime? @map("sale_end_at")
+  status      String    @default("draft")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  sessions Session[]
+
+  @@map("events")
+}
+
+// 場次
+model Session {
+  id          Int      @id @default(autoincrement())
+  eventId     Int      @map("event_id")
+  sessionDate DateTime @map("session_date") @db.Date
+  sessionTime String   @map("session_time")
+  status      String   @default("active")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  ticketTypes TicketType[]
+  orders      Order[]
+
+  @@map("sessions")
+}
+
+// 票種
+model TicketType {
+  id               Int      @id @default(autoincrement())
+  sessionId        Int      @map("session_id")
+  name             String
+  price            Decimal  @db.Decimal(10, 2)
+  totalQuantity    Int      @map("total_quantity")
+  reservedQuantity Int      @default(0) @map("reserved_quantity")
+  maxPerOrder      Int      @default(4) @map("max_per_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  session    Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  seats      Seat[]
+  orderItems OrderItem[]
+
+  @@map("ticket_types")
+}
+
+// 座位
+model Seat {
+  id           Int       @id @default(autoincrement())
+  ticketTypeId Int       @map("ticket_type_id")
+  rowName      String    @map("row_name")
+  seatNumber   String    @map("seat_number")
+  status       String    @default("available")
+  lockedUntil  DateTime? @map("locked_until")
+  lockedBy     String?   @map("locked_by")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  ticketType TicketType  @relation(fields: [ticketTypeId], references: [id], onDelete: Cascade)
+  orderItems OrderItem[]
+
+  @@map("seats")
+}
+
+// 訂單明細
+model OrderItem {
+  id           Int      @id @default(autoincrement())
+  orderId      String   @map("order_id")
+  seatId       Int      @map("seat_id")
+  ticketTypeId Int      @map("ticket_type_id")
+  price        Decimal  @db.Decimal(10, 2)
+  ticketCode   String?  @map("ticket_code")
+  qrCode       String?  @map("qr_code")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  order      Order      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  seat       Seat       @relation(fields: [seatId], references: [id])
+  ticketType TicketType @relation(fields: [ticketTypeId], references: [id])
+
+  @@map("order_items")
 }
