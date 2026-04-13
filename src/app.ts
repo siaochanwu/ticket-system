@@ -14,6 +14,7 @@ import authPlugin from './plugins/auth.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import eventsRoutes from './modules/events/events.routes.js';
 import ticketsRoutes from './modules/tickets/tickets.routes.js';
+import ordersRoutes from './modules/orders/orders.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
     const app = Fastify({
@@ -21,11 +22,11 @@ export async function buildApp(): Promise<FastifyInstance> {
             level: config.isDev ? 'info' : 'error',
             transport: config.isDev
                 ? {
-                      target: 'pino-pretty',
-                      options: {
-                          colorize: true,
-                      },
-                  }
+                    target: 'pino-pretty',
+                    options: {
+                        colorize: true,
+                    },
+                }
                 : undefined,
         },
     });
@@ -60,6 +61,7 @@ export async function buildApp(): Promise<FastifyInstance> {
                 { name: 'auth', description: '認證相關' },
                 { name: 'events', description: '活動相關' },
                 { name: 'tickets', description: '票券相關' },
+                { name: 'orders', description: '訂單相關' },
             ],
             securityDefinitions: {
                 Bearer: {
@@ -121,6 +123,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     await app.register(authRoutes, { prefix: '/api/auth' });
     await app.register(eventsRoutes, { prefix: '/api/events' });
     await app.register(ticketsRoutes, { prefix: '/api/tickets' });
+    await app.register(ordersRoutes, { prefix: '/api/orders' });
 
     return app;
 }

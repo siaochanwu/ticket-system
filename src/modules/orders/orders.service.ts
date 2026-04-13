@@ -1,0 +1,286 @@
+import prisma from '../../config/database.js';
+import redis from '../../config/redis.js';
+import { AppError, Errors } from '../../plugins/errorHandler.js';
+import { CreateOrderInput, OrderResponse, OrdersResponse } from './orders.type.js';
+
+export async function createOrder(input: CreateOrderInput): Promise<OrderResponse> {
+    const { userId, lockId } = input;
+
+    // 1. 從 Redis 取得先前的選位鎖定資訊 (Double Check)
+    const userLockKey = `user:locks:${userId}`;
+    const lockData = await redis.hget(userLockKey, lockId);
+
+    if (!lockData) {
+        throw new AppError('選位鎖定已過期或不存在', 400, 'LOCK_EXPIRED');
+    }
+
+    const { sessionId, seatIds, expiresAt } = JSON.parse(lockData);
+
+    // 2. 資料庫交易：建立訂單 + 更新座位狀態
+    const result = await prisma.$transaction(async (tx) => {
+        // 驗證座位是否真的被該用戶鎖定
+        const seats = await tx.seat.findMany({
+            where: {
+                id: { in: seatIds },
+                lockedBy: userId,
+                status: 'locked',
+
+            },
+            include: {
+                ticketType: true,
+            }
+        })
+
+        if (seats.length !== seatIds.length) {
+            throw new AppError('座位狀態變更，請重新選擇', 400, 'SEAT_UNAVAILABLE')
+        }
+
+        const totalAmount = seats.reduce((sum, seat) => sum + Number(seat.ticketType.price), 0);
+        const orderNo = `TKT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+        const order = await tx.order.create({
+            data: {
+                orderNo,
+                userId,
+                sessionId,
+                status: 'pending',
+                totalAmount,
+                expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 付款時限 10 分鐘
+            }
+        })
+
+        const orderItems = await Promise.all(seats.map(seat => {
+            return tx.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    seatId: seat.id,
+                    ticketTypeId: seat.ticketTypeId,
+                    price: seat.ticketType.price,
+                },
+                include: {
+                    seat: true,
+                    ticketType: true,
+                }
+            })
+        }))
+
+
+        return {
+            id: order.id,
+            orderNo: order.orderNo,
+            status: order.status,
+            totalAmount: order.totalAmount.toString(),
+            expiresAt: order.expiresAt,
+            items: orderItems.map(item => ({
+                id: item.id,
+                seat: {
+                    rowName: item.seat.rowName,
+                    seatNumber: item.seat.seatNumber,
+                },
+                ticketType: {
+                    name: item.ticketType.name,
+                },
+                price: item.price.toString()
+            }))
+        }
+    })
+
+    // 3. 清除 Redis 鎖定 (放在交易成功之後)
+    for (const seatId of seatIds) {
+        await redis.del(`seat:lock:${seatId}`);
+    }
+    await redis.hdel(userLockKey, lockId);
+
+    return result;
+}
+
+export async function getOrders(userId: string): Promise<OrdersResponse> {
+    if (!userId) {
+        throw Errors.UNAUTHORIZED;
+    }
+
+    const orders = await prisma.order.findMany({
+        where: {
+            userId,
+        },
+        include: {
+            session: {
+                include: {
+                    event: true, // 關聯至場次與活動
+                }
+            },
+            items: {
+                include: {
+                    seat: true, // 關聯至座位 (取得排/號)
+                    ticketType: true, // 關聯至座位 (取得排/號)
+                }
+            },
+        },
+        orderBy: {
+            createdAt: 'desc',
+        }
+    })
+
+    const now = new Date();
+
+    return orders.map(order => {
+        // 若已超時且依然是 pending，前端顯示過期
+        const isExpired = order.status === 'pending' && order.expiresAt < now;
+        const finalStatus = isExpired ? 'expired' : order.status;
+
+        return {
+            id: order.id,
+            orderNo: order.orderNo,
+            status: finalStatus,
+            totalAmount: order.totalAmount.toString(),
+            expiresAt: order.expiresAt,
+            items: order.items.map(item => ({
+                id: item.id,
+                seat: {
+                    rowName: item.seat.rowName,
+                    seatNumber: item.seat.seatNumber,
+                },
+                ticketType: {
+                    name: item.ticketType.name,
+                },
+                price: item.price.toString()
+            }))
+        }
+    })
+}
+
+export async function getOrderById(userId: string, orderId: string): Promise<OrderResponse> {
+    const order = await prisma.order.findUnique({
+        where: {
+            id: orderId,
+            userId,
+        },
+        include: {
+            session: {
+                include: {
+                    event: true,
+                }
+            },
+            items: {
+                include: {
+                    seat: true,
+                    ticketType: true,
+                }
+            }
+        }
+    })
+
+    if (!order) {
+        throw Errors.ORDER_NOT_FOUND;
+    }
+
+    const now = new Date();
+    const isExpired = order.status === 'pending' && order.expiresAt < now;
+    const finalStatus = isExpired ? 'expired' : order.status;
+
+    return {
+        id: order.id,
+        orderNo: order.orderNo,
+        status: finalStatus,
+        totalAmount: order.totalAmount.toString(),
+        expiresAt: order.expiresAt,
+        items: order.items.map(item => ({
+            id: item.id,
+            seat: {
+                rowName: item.seat.rowName,
+                seatNumber: item.seat.seatNumber,
+            },
+            ticketType: {
+                name: item.ticketType.name,
+            },
+            price: item.price.toString()
+        }))
+    }
+}
+
+export async function cancelOrder(userId: string, orderId: string): Promise<OrderResponse> {
+    // 只有pending 狀態可以取消
+    // 改狀態 -> cancelled
+    // 解鎖座位
+    const order = await prisma.order.findFirst({
+        where: {
+            id: orderId,
+            userId,
+        },
+        include: {
+            items: true // 把關聯的 items 撈出來，這樣才知道要釋放哪些座位
+        }
+    })
+
+    if (!order) {
+        throw Errors.ORDER_NOT_FOUND;
+    }
+
+    if (order.status !== 'pending') {
+        throw new AppError('只能取消待付款的訂單', 400, 'ORDER_CANNOT_CANCEL')
+    }
+
+    // 取消訂單與釋放座位
+    const result = await prisma.$transaction(async (tx) => {
+        // 1. 更新訂單狀態
+        const updatedOrder = await tx.order.update({
+            where: {
+                id: orderId,
+            },
+            data: {
+                status: 'cancelled',
+            },
+            include: {
+                session: {
+                    include: {
+                        event: true
+                    }
+                },
+                items: {
+                    include: {
+                        seat: true,
+                        ticketType: true,
+                    }
+                }
+            }
+        })
+        // 2. 取出所有這個訂單佔用的座位 ID
+        const seatIds = order.items.map(item => item.seatId);
+        console.log('seatIds', seatIds)
+
+        // 3. 解鎖座位
+        await tx.seat.updateMany({
+            where: {
+                id: {
+                    in: seatIds
+                }
+            },
+            data: {
+                status: 'available',
+                lockedBy: null,
+                lockedUntil: null,
+            }
+        })
+
+        return updatedOrder;
+    })
+
+    return {
+        id: result.id,
+        orderNo: result.orderNo,
+        status: result.status,
+        totalAmount: result.totalAmount.toString(),
+        expiresAt: result.expiresAt,
+        items: result.items.map(item => ({
+            id: item.id,
+            seat: {
+                rowName: item.seat.rowName,
+                seatNumber: item.seat.seatNumber,
+            },
+            ticketType: {
+                name: item.ticketType.name,
+            },
+            price: item.price.toString()
+        }))
+    }
+}
