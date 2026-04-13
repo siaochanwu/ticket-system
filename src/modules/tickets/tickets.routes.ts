@@ -87,6 +87,10 @@ export default async function ticketsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticate],
             schema: {
+                tags: ['tickets'],
+                summary: '釋放座位',
+                description: '釋放指定的鎖定座位',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['lockId'],
@@ -114,6 +118,12 @@ export default async function ticketsRoutes(app: FastifyInstance) {
         '/my-locks',
         {
             onRequest: [app.authenticate],
+            schema: {
+                tags: ['tickets'],
+                summary: '取得我的鎖定座位',
+                description: '取得我的鎖定座位',
+                security: [{ Bearer: [] }],
+            }
         },
         async (request, reply) => {
             const locks = await ticketsService.getUserLocks(request.user.id);

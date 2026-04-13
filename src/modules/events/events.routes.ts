@@ -75,6 +75,9 @@ export default async function eventsRoutes(app: FastifyInstance) {
         '/sessions/:sessionId',
         {
             schema: {
+                tags: ['events'],
+                summary: '取得場次詳情',
+                description: '根據 ID 取得單一場次的詳細資訊',
                 params: {
                     type: 'object',
                     required: ['sessionId'],
@@ -100,6 +103,9 @@ export default async function eventsRoutes(app: FastifyInstance) {
         '/sessions/:sessionId/seats',
         {
             schema: {
+                tags: ['events'],
+                summary: '取得場次座位',
+                description: '根據 ID 取得單一場次的座位資訊',
                 params: {
                     type: 'object',
                     required: ['sessionId'],
@@ -125,6 +131,9 @@ export default async function eventsRoutes(app: FastifyInstance) {
         '/sessions/:sessionId/availability',
         {
             schema: {
+                tags: ['events'],
+                summary: '取得單一場次每個票種的剩餘數量',
+                description: '根據 ID 取得單一場次的每個票種的剩餘數量',
                 params: {
                     type: 'object',
                     required: ['sessionId'],
@@ -153,6 +162,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '建立活動',
+                description: '建立新的活動',
+                security: [{ Bearer: [] }],
                 body: {
                     type: 'object',
                     required: ['title', 'saleStartAt', 'venue'],
@@ -187,6 +200,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '更新活動',
+                description: '更新指定的活動',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['id'],
@@ -215,6 +232,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '刪除活動',
+                description: '刪除指定的活動',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['id'],
@@ -238,6 +259,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '建立場次',
+                description: '建立新的場次',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['id'],
@@ -275,6 +300,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '建立票種',
+                description: '建立新的票種',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['sessionId'],
@@ -317,6 +346,10 @@ export default async function eventsRoutes(app: FastifyInstance) {
         {
             onRequest: [app.authenticateAdmin],
             schema: {
+                tags: ['events'],
+                summary: '批次建立座位',
+                description: '批次建立座位',
+                security: [{ Bearer: [] }],
                 params: {
                     type: 'object',
                     required: ['ticketTypeId'],
