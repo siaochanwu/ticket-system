@@ -318,7 +318,7 @@ export async function createTicketType(input: CreateTicketTypeInput) {
 // 批次建立座位
 export async function createSeats(input: CreateSeatsInput) {
     return await prisma.$transaction(async (tx) => {
-        const ticketType = await prisma.ticketType.findUnique({
+        const ticketType = await tx.ticketType.findUnique({
             where: {
                 id: input.ticketTypeId,
             },
@@ -339,7 +339,7 @@ export async function createSeats(input: CreateSeatsInput) {
         const BATCH_SIZE = 1000;
         for (let i = 0; i < seats.length; i += BATCH_SIZE) {
             const batch = seats.slice(i, i + BATCH_SIZE);
-            await prisma.seat.createMany({
+            await tx.seat.createMany({
                 data: batch,
             });
         }

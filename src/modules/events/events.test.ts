@@ -503,7 +503,8 @@ describe('Events Module', () => {
             expect(response.statusCode).toBe(201);
             expect(body.data.name).toBe('VIP區');
             expect(Number(body.data.price)).toBe(5800);
-            expect;
+            expect(body.data.totalQuantity).toBe(100);
+            expect(body.data.maxPerOrder).toBe(4);
         });
     });
 
