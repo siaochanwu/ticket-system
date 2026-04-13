@@ -18,7 +18,8 @@
     "fastify": "^5.0.0",
     "fastify-plugin": "^5.1.0",
     "ioredis": "^5.4.0",
-    "pg": "^8.12.0"
+    "pg": "^8.12.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
