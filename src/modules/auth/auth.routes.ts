@@ -29,26 +29,12 @@ export default async function authRoutes(app: FastifyInstance) {
             },
         },
         async (request, reply) => {
-            try {
-                const user = await authService.register(request.body);
-                reply.status(201).send({
-                    success: true,
-                    message: '註冊成功',
-                    data: user,
-                });
-            } catch (error) {
-                if (
-                    error instanceof Error &&
-                    error.message === 'EMAIL_EXISTS'
-                ) {
-                    reply.status(400).send({
-                        success: false,
-                        message: '此 Email 已被註冊',
-                    });
-                    return;
-                }
-                throw error;
-            }
+            const user = await authService.register(request.body);
+            reply.status(201).send({
+                success: true,
+                message: '註冊成功',
+                data: user,
+            });
         }
     );
 
@@ -67,36 +53,22 @@ export default async function authRoutes(app: FastifyInstance) {
             },
         },
         async (request, reply) => {
-            try {
-                const user = await authService.login(request.body);
+            const user = await authService.login(request.body);
 
-                const token = app.jwt.sign({
-                    id: user.id,
-                    email: user.email,
-                    role: user.role,
-                });
+            const token = app.jwt.sign({
+                id: user.id,
+                email: user.email,
+                role: user.role,
+            });
 
-                reply.send({
-                    success: true,
-                    message: '登入成功',
-                    data: {
-                        user,
-                        token,
-                    },
-                });
-            } catch (error) {
-                if (
-                    error instanceof Error &&
-                    error.message === 'INVALID_CREDENTIALS'
-                ) {
-                    reply.status(401).send({
-                        success: false,
-                        message: '帳號或密碼錯誤',
-                    });
-                    return;
-                }
-                throw error;
-            }
+            reply.send({
+                success: true,
+                message: '登入成功',
+                data: {
+                    user,
+                    token,
+                },
+            });
         }
     );
 

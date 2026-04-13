@@ -4,6 +4,7 @@ node_modules/
 # 環境變數
 .env
 .env.local
+.env.test
 
 # 編譯輸出
 dist/
@@ -16,3 +17,4 @@ ARCHITECTURE.md
 
 # test
 test-redis.ts
+test-debug.ts
