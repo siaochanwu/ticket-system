@@ -25,7 +25,6 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/ioredis": "^5.0.0",
     "@types/node": "^22.5.0",
     "@types/pg": "^8.11.0",
     "pino-pretty": "^13.1.2",
@@ -33,5 +32,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",
     "vitest": "^4.0.15"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   }
 }

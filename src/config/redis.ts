@@ -1,9 +1,9 @@
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import config from './index.js';
 
 const redis = new Redis(config.redis.url, {
     maxRetriesPerRequest: 3, // 每個請求最多重試 3 次
-    retryStrategy: (times) => {
+    retryStrategy: (times: number) => {
         // 重試策略
         const delay = Math.min(times * 50, 2000); // 最多等待 2 秒
         return delay;
@@ -14,7 +14,7 @@ redis.on('connect', () => {
     console.log('Redis connected');
 });
 
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
     console.error('Redis connection error:', err);
 });
 
@@ -58,7 +58,7 @@ export const redisUtils = {
       end
     `;
 
-        const result = await redis.eval(script, 1, key, quantity);
+        const result = await redis.eval(script, 1, key, quantity) as number;
         return result;
     },
 
