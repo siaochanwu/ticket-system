@@ -10,6 +10,7 @@ import redis, { redisUtils, closeRedis } from './config/redis.js';
 import errorHandlerPlugin from './plugins/errorHandler.js';
 import authPlugin from './plugins/auth.js';
 import authRoutes from './modules/auth/auth.routes.js';
+import eventsRoutes from './modules/events/events.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
     const app = Fastify({
@@ -78,6 +79,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     // Auth 路由
     await app.register(authRoutes, { prefix: '/api/auth' });
+    await app.register(eventsRoutes, { prefix: '/api/events' });
 
     return app;
 }
