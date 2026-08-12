@@ -71,6 +71,15 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
         );
     }
 
+    // 2.5 檢查座位 DB 狀態（Redis 鎖可能已過期，DB 才是最終真相）
+    const unavailable = seats.filter((seat) => seat.status !== 'available');
+    if (unavailable.length > 0) {
+        // locked 表示他人選位／下單中，sold 等其他狀態表示已無法購買，分開回報
+        throw unavailable.every((seat) => seat.status === 'locked')
+            ? Errors.SEAT_LOCKED
+            : Errors.SEAT_NOT_AVAILABLE;
+    }
+
     // 3. 檢查購買上限 (在同一票種時檢查)
     if (seats.length > 0 && seatIds.length > seats[0].ticketType.maxPerOrder) {
         throw Errors.EXCEED_LIMIT;
@@ -101,23 +110,36 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
             if (!locked) {
                 // 鎖定失敗，檢查是否是自己鎖的
                 const existing = await redis.get(lockKey);
-                if (existing) {
-                    const data = JSON.parse(existing);
-                    if (data.userId !== userId) {
-                        // 別人鎖的，回滾已鎖定的座位
-                        throw Errors.SEAT_LOCKED;
-                    }
+                if (!existing) {
+                    // 鎖在兩次呼叫之間過期，視為競爭失敗
+                    throw Errors.SEAT_LOCKED;
                 }
+
+                const data = JSON.parse(existing);
+                if (data.userId !== userId) {
+                    // 別人鎖的，回滾已鎖定的座位
+                    throw Errors.SEAT_LOCKED;
+                }
+
+                // 自己鎖的：換成這次的 lockId 並延長，同時納入 DB 更新範圍
+                await redis.set(
+                    lockKey,
+                    JSON.stringify({ lockId, userId, sessionId }),
+                    'EX',
+                    LOCK_DURATION
+                );
+                lockedSeats.push(seat.id);
             } else {
                 lockedSeats.push(seat.id);
             }
         }
-        // 5. 更新資料庫座位狀態
-        await prisma.seat.updateMany({
+        // 5. 更新資料庫座位狀態（只在仍為 available 時更新，避免覆寫他人鎖定）
+        const updated = await prisma.seat.updateMany({
             where: {
                 id: {
                     in: lockedSeats,
                 },
+                status: 'available',
             },
             data: {
                 status: 'locked',
@@ -125,6 +147,11 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
                 lockedUntil: expiresAt,
             },
         });
+
+        if (updated.count !== lockedSeats.length) {
+            // 有座位在檢查與更新之間被搶走，交給 catch 回滾 Redis 鎖
+            throw Errors.SEAT_LOCKED;
+        }
         // 6. 儲存用戶鎖定資訊到 Redis
         const userLockKey = `user:locks:${userId}`;
         await redis.hset(

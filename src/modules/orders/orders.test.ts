@@ -144,10 +144,13 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
             const lockKey = `seat:lock:${seatIds[0]}`;
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
+            const ttl = await redis.ttl(lockKey);
+            expect(ttl).toBeGreaterThan(0);
+            expect(ttl).toBeLessThanOrEqual(10 * 60);
         });
 
         it('鎖定過期後建立訂單應該失敗', async () => {
@@ -198,10 +201,10 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
             const lockKey = `seat:lock:${seatIds[0]}`;
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
 
             // 5. 取得訂單列表
             const getRes = await app.inject({
@@ -263,10 +266,10 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
             const lockKey = `seat:lock:${seatIds[0]}`;
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
 
             // 5. 取得訂單明細
             const orderId = body.data.id;
@@ -286,5 +289,75 @@ describe('Orders Module', () => {
         })
     })
 
+    describe('POST /api/orders/:orderId/cancel', () => {
+        it('應該能取消 pending 訂單並釋放座位與 Redis 鎖', async () => {
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            const seat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+            expect(seat?.status).toBe('available');
+            expect(seat?.lockedBy).toBeNull();
+
+            const exists = await redis.exists(`seat:lock:${seatIds[0]}`);
+            expect(exists).toBe(0);
+        });
+
+        it('非 pending 的訂單不應該能取消', async () => {
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            const secondRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(secondRes.statusCode).toBe(400);
+            expect(JSON.parse(secondRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+        });
+    });
 
 });

@@ -1,6 +1,7 @@
 import prisma from '../../config/database.js';
 import redis from '../../config/redis.js';
 import { AppError, Errors } from '../../plugins/errorHandler.js';
+import config from '../../config/index.js';
 import { CreateOrderInput, OrderResponse, OrdersResponse } from './orders.type.js';
 
 export async function createOrder(input: CreateOrderInput): Promise<OrderResponse> {
@@ -15,6 +16,8 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
     }
 
     const { sessionId, seatIds, expiresAt } = JSON.parse(lockData);
+
+    const paymentTimeoutMs = config.order.paymentTimeoutMinutes * 60 * 1000;
 
     // 2. 資料庫交易：建立訂單 + 更新座位狀態
     const result = await prisma.$transaction(async (tx) => {
@@ -45,7 +48,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
                 sessionId,
                 status: 'pending',
                 totalAmount,
-                expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 付款時限 10 分鐘
+                expiresAt: new Date(Date.now() + paymentTimeoutMs), // 付款時限
             }
         })
 
@@ -85,9 +88,12 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
         }
     })
 
-    // 3. 清除 Redis 鎖定 (放在交易成功之後)
+    // 3. 保留 seat:lock 並把 TTL 延長到付款期限
+    //    訂單 pending 期間 Redis 與 DB 兩層防護必須一致，
+    //    只有付款成功、使用者取消、worker 判定逾期時才刪除
+    const lockTtlSeconds = Math.ceil(paymentTimeoutMs / 1000);
     for (const seatId of seatIds) {
-        await redis.del(`seat:lock:${seatId}`);
+        await redis.expire(`seat:lock:${seatId}`, lockTtlSeconds);
     }
     await redis.hdel(userLockKey, lockId);
 
@@ -246,7 +252,6 @@ export async function cancelOrder(userId: string, orderId: string): Promise<Orde
         })
         // 2. 取出所有這個訂單佔用的座位 ID
         const seatIds = order.items.map(item => item.seatId);
-        console.log('seatIds', seatIds)
 
         // 3. 解鎖座位
         await tx.seat.updateMany({
@@ -264,6 +269,11 @@ export async function cancelOrder(userId: string, orderId: string): Promise<Orde
 
         return updatedOrder;
     })
+
+    // 訂單已取消，釋放 Redis 座位鎖
+    for (const item of order.items) {
+        await redis.del(`seat:lock:${item.seatId}`);
+    }
 
     return {
         id: result.id,
