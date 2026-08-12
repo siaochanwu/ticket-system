@@ -28,6 +28,21 @@ export interface AppConfig {
         seatLockDurationSeconds: number;
         maxTicketsPerOrder: number;
     };
+    order: {
+        paymentTimeoutMinutes: number;
+    };
+    payment: {
+        mockSecret: string;
+        callbackBaseUrl: string;
+    };
+    refund: {
+        deadlineDays: number;
+    };
+    worker: {
+        orderExpiryIntervalMs: number;
+        leaderLockTtlSeconds: number;
+        batchSize: number;
+    };
 }
 
 export const config: AppConfig = {
@@ -69,6 +84,39 @@ export const config: AppConfig = {
             process.env.MAX_TICKETS_PER_ORDER || '4',
             10
         ),
+    },
+
+    // 訂單設定
+    order: {
+        paymentTimeoutMinutes: parseInt(
+            process.env.ORDER_PAYMENT_TIMEOUT_MINUTES || '10',
+            10
+        ),
+    },
+
+    // 金流設定（作品集使用 mock provider）
+    payment: {
+        mockSecret: process.env.PAYMENT_MOCK_SECRET || 'mock-payment-secret',
+        callbackBaseUrl:
+            process.env.PAYMENT_CALLBACK_BASE_URL || 'http://localhost:3000',
+    },
+
+    // 退票設定
+    refund: {
+        deadlineDays: parseInt(process.env.REFUND_DEADLINE_DAYS || '7', 10),
+    },
+
+    // 背景 worker 設定
+    worker: {
+        orderExpiryIntervalMs: parseInt(
+            process.env.ORDER_EXPIRY_INTERVAL_MS || '30000',
+            10
+        ),
+        leaderLockTtlSeconds: parseInt(
+            process.env.ORDER_EXPIRY_LOCK_TTL_SECONDS || '25',
+            10
+        ),
+        batchSize: parseInt(process.env.ORDER_EXPIRY_BATCH_SIZE || '100', 10),
     },
 };
 

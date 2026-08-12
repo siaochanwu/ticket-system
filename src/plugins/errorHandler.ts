@@ -45,6 +45,33 @@ export const Errors = {
     ORDER_NOT_FOUND: new AppError('訂單不存在', 404, 'ORDER_NOT_FOUND'),
     ORDER_EXPIRED: new AppError('訂單已過期', 410, 'ORDER_EXPIRED'),
     ORDER_ALREADY_PAID: new AppError('訂單已付款', 409, 'ORDER_ALREADY_PAID'),
+    ORDER_NOT_PAID: new AppError('訂單尚未付款', 400, 'ORDER_NOT_PAID'),
+
+    // 付款相關
+    PAYMENT_NOT_FOUND: new AppError('付款記錄不存在', 404, 'PAYMENT_NOT_FOUND'),
+    INVALID_SIGNATURE: new AppError('簽章驗證失敗', 401, 'INVALID_SIGNATURE'),
+    AMOUNT_MISMATCH: new AppError('付款金額不符', 400, 'AMOUNT_MISMATCH'),
+
+    // 票券相關
+    TICKET_NOT_FOUND: new AppError('票券不存在', 404, 'TICKET_NOT_FOUND'),
+
+    // 退票相關
+    REFUND_ALREADY_REQUESTED: new AppError(
+        '已有退票申請正在處理',
+        409,
+        'REFUND_ALREADY_REQUESTED'
+    ),
+    REFUND_DEADLINE_PASSED: new AppError(
+        '已超過退票期限',
+        400,
+        'REFUND_DEADLINE_PASSED'
+    ),
+    REFUND_NOT_FOUND: new AppError('退票申請不存在', 404, 'REFUND_NOT_FOUND'),
+    REFUND_ALREADY_PROCESSED: new AppError(
+        '此退票申請已處理',
+        409,
+        'REFUND_ALREADY_PROCESSED'
+    ),
 
     // 系統相關
     INTERNAL_ERROR: new AppError('系統錯誤，請稍後再試', 500, 'INTERNAL_ERROR'),

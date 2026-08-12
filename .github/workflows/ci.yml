@@ -61,3 +61,10 @@ jobs:
                   DATABASE_URL: postgresql://tickets:tickets@localhost:5432/tickets?schema=public
                   REDIS_URL: redis://localhost:6379
                   JWT_SECRET: ${{ secrets.JWT_SECRET }}
+                  ORDER_PAYMENT_TIMEOUT_MINUTES: '10'
+                  PAYMENT_MOCK_SECRET: ci-mock-secret
+                  PAYMENT_CALLBACK_BASE_URL: http://localhost:3000
+                  REFUND_DEADLINE_DAYS: '7'
+                  ORDER_EXPIRY_INTERVAL_MS: '30000'
+                  ORDER_EXPIRY_LOCK_TTL_SECONDS: '25'
+                  ORDER_EXPIRY_BATCH_SIZE: '100'
