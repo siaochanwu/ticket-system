@@ -10,8 +10,14 @@ import {
 
 const instanceId = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
 
+// tick() 整批失敗（例如 DB／Redis 斷線）連續達到這個次數，
+// 就視為系統性故障、直接結束程序讓 docker 的 restart policy 接手，
+// 避免進程「活著」但什麼都做不了、卻沒有任何訊號能被發現。
+const MAX_CONSECUTIVE_FAILURES = 5;
+
 let running = true;
 let currentTick: Promise<unknown> = Promise.resolve();
+let consecutiveFailures = 0;
 
 async function tick() {
     // 兩種回收共用同一把 leader lock，確保同一輪只有一個實例在動座位
@@ -41,9 +47,26 @@ async function tick() {
 
 async function loop() {
     while (running) {
-        currentTick = tick().catch((error) => {
-            console.error('[orderExpiry] tick 失敗', error);
-        });
+        currentTick = tick()
+            .then(() => {
+                // 單筆訂單失敗已經在 expireOverdueOrders 內部吞掉，
+                // 能跑到這裡代表整個 tick（取鎖＋兩個回收函式）沒有整批失敗
+                consecutiveFailures = 0;
+            })
+            .catch((error) => {
+                consecutiveFailures += 1;
+                console.error(
+                    `[orderExpiry] tick 失敗（連續第 ${consecutiveFailures} 次）`,
+                    error
+                );
+
+                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                    console.error(
+                        `[orderExpiry] 連續失敗達 ${MAX_CONSECUTIVE_FAILURES} 次，判定為系統性故障，結束程序讓 restart policy 接手`
+                    );
+                    process.exit(1);
+                }
+            });
         await currentTick;
 
         if (!running) break;

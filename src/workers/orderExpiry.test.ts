@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+    describe,
+    it,
+    expect,
+    beforeAll,
+    afterAll,
+    beforeEach,
+    vi,
+} from 'vitest';
 import prisma from '../config/database.js';
 import redis, { closeRedis } from '../config/redis.js';
 import config from '../config/index.js';
@@ -148,6 +156,48 @@ describe('orderExpiry worker', () => {
         expect(exists).toBe(0);
     });
 
+    it('座位若已被別人合法搶走（lockedBy 不同），不應該釋放它（Important 3 回歸）', async () => {
+        const otherUserId = 'other-user-id';
+        const { order, seat } = await createOrder(new Date(Date.now() - 1000));
+
+        // 模擬在 worker 掃到與實際 release 之間，座位已經被別人合法鎖走
+        await prisma.seat.update({
+            where: { id: seat.id },
+            data: { lockedBy: otherUserId },
+        });
+
+        const count = await expireOverdueOrders();
+
+        // 訂單本身的狀態轉換與座位是否成功釋放是獨立判斷，訂單仍應標記過期
+        expect(count).toBe(1);
+
+        const dbOrder = await prisma.order.findUnique({
+            where: { id: order.id },
+        });
+        expect(dbOrder?.status).toBe('expired');
+
+        const dbSeat = await prisma.seat.findUnique({ where: { id: seat.id } });
+        expect(dbSeat?.status).toBe('locked');
+        expect(dbSeat?.lockedBy).toBe(otherUserId);
+    });
+
+    it('座位的 Redis 鎖若已經是別人重新取得的，不應該被刪除（Important 4 回歸）', async () => {
+        const { seat } = await createOrder(new Date(Date.now() - 1000));
+
+        // 模擬 DB 交易 commit 之後、redis.del 之前，Redis 鎖已被別的使用者合法取得
+        await redis.set(
+            `seat:lock:${seat.id}`,
+            JSON.stringify({ userId: 'other-user-id', sessionId }),
+            'EX',
+            600
+        );
+
+        await expireOverdueOrders();
+
+        const exists = await redis.exists(`seat:lock:${seat.id}`);
+        expect(exists).toBe(1);
+    });
+
     it('未逾期的 pending 訂單不應受影響', async () => {
         const { order, seat } = await createOrder(
             new Date(Date.now() + 10 * 60 * 1000)
@@ -186,16 +236,103 @@ describe('orderExpiry worker', () => {
         expect(dbSeat?.status).toBe('sold');
     });
 
-    it('一次最多只處理 batchSize 筆', async () => {
-        const total = config.worker.batchSize + 2;
-        for (let i = 0; i < total; i += 1) {
-            await createOrder(new Date(Date.now() - 1000));
+    it('應該只計算真正回收成功的筆數，而不是撈到的逾期訂單數', async () => {
+        const { order } = await createOrder(new Date(Date.now() - 1000));
+
+        // 外層 findMany 撈到這筆訂單（此時仍是 pending）之後、
+        // 交易真正開始之前，模擬使用者剛好完成付款（狀態搶先變成 paid）——
+        // 交易內的二次確認應該讓這筆變成 no-op，不能被計入成功筆數
+        const originalTransaction = prisma.$transaction.bind(prisma);
+        const spy = vi
+            .spyOn(prisma, '$transaction')
+            .mockImplementationOnce(async (...args: unknown[]) => {
+                await prisma.order.update({
+                    where: { id: order.id },
+                    data: { status: 'paid' },
+                });
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return (originalTransaction as any)(...args);
+            });
+
+        const count = await expireOverdueOrders();
+
+        spy.mockRestore();
+
+        expect(count).toBe(0);
+
+        const dbOrder = await prisma.order.findUnique({
+            where: { id: order.id },
+        });
+        expect(dbOrder?.status).toBe('paid');
+    });
+
+    it('批次中有一筆處理失敗，不應該中斷其餘訂單的回收', async () => {
+        // expiresAt 越早代表越舊，依 orderBy: asc 會被排在前面先處理
+        const early = await createOrder(new Date(Date.now() - 5000));
+        const later = await createOrder(new Date(Date.now() - 1000));
+
+        const originalTransaction = prisma.$transaction.bind(prisma);
+        let callCount = 0;
+        const spy = vi
+            .spyOn(prisma, '$transaction')
+            .mockImplementation((...args: unknown[]) => {
+                callCount += 1;
+                if (callCount === 1) {
+                    return Promise.reject(new Error('模擬資料庫暫時性錯誤'));
+                }
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return (originalTransaction as any)(...args);
+            });
+
+        const count = await expireOverdueOrders();
+
+        spy.mockRestore();
+
+        // 只有沒被模擬故障影響的那一筆算成功
+        expect(count).toBe(1);
+
+        const dbEarly = await prisma.order.findUnique({
+            where: { id: early.order.id },
+        });
+        const dbLater = await prisma.order.findUnique({
+            where: { id: later.order.id },
+        });
+
+        expect(dbEarly?.status).toBe('pending');
+        expect(dbLater?.status).toBe('expired');
+    });
+
+    it('一次最多只處理指定的 batchSize 筆，且依 expiresAt 由舊到新處理', async () => {
+        // 用較小的 batchSize（而非 config 預設的 100）大幅降低本測試的
+        // fixture 成本，避免在 CI 上跟 testTimeout 賽跑
+        const batchSize = 3;
+        const created: Awaited<ReturnType<typeof createOrder>>[] = [];
+
+        for (let i = 0; i < batchSize + 2; i += 1) {
+            // expiresAt 依序遞增，index 越小代表越早過期（越舊）
+            created.push(
+                await createOrder(new Date(Date.now() - (100000 - i * 1000)))
+            );
         }
 
-        const first = await expireOverdueOrders();
-        expect(first).toBe(config.worker.batchSize);
+        const first = await expireOverdueOrders(batchSize);
+        expect(first).toBe(batchSize);
 
-        const second = await expireOverdueOrders();
+        const statuses = await Promise.all(
+            created.map(({ order }) =>
+                prisma.order.findUnique({ where: { id: order.id } })
+            )
+        );
+
+        // orderBy: asc 應該優先處理「最舊」的 batchSize 筆，而非任意順序的 batchSize 筆
+        expect(
+            statuses.slice(0, batchSize).every((o) => o?.status === 'expired')
+        ).toBe(true);
+        expect(
+            statuses.slice(batchSize).every((o) => o?.status === 'pending')
+        ).toBe(true);
+
+        const second = await expireOverdueOrders(batchSize);
         expect(second).toBe(2);
     });
 
@@ -252,6 +389,73 @@ describe('orderExpiry worker', () => {
         expect(dbSeat?.status).toBe('locked');
     });
 
+    it('已付款但座位仍卡在 locked 的座位不應該被釋放（Important 2 回歸）', async () => {
+        // 目前 repo 還沒有付款模組，這裡模擬未來付款流程若非單一交易，
+        // order 已經 paid 但 seat 還沒被同步為 sold 的中間態
+        const { seat } = await createOrder(
+            new Date(Date.now() - 1000),
+            'paid',
+            'locked'
+        );
+
+        const count = await reclaimAbandonedSeatLocks();
+
+        expect(count).toBe(0);
+
+        const dbSeat = await prisma.seat.findUnique({ where: { id: seat.id } });
+        expect(dbSeat?.status).toBe('locked');
+    });
+
+    it('findMany 之後、updateMany 之前才建立的 pending 訂單不應該被放掉（Critical 1 回歸）', async () => {
+        const seat = await createAbandonedSeat(new Date(Date.now() - 1000));
+
+        // Prisma model delegate（prisma.seat）的方法是透過 Proxy 動態產生的，
+        // 它的 property descriptor 回報 value: undefined，導致 vi.spyOn()
+        // 誤判成「不是函式」而拋錯；直接覆寫屬性則不受影響（已用獨立腳本驗證），
+        // 故這裡改用手動替換＋finally 還原，而非 vi.spyOn／mockRestore。
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const seatDelegate = prisma.seat as any;
+        const originalFindMany = seatDelegate.findMany.bind(prisma.seat);
+
+        seatDelegate.findMany = async (args: unknown) => {
+            const result = await originalFindMany(args);
+
+            // 模擬 race：findMany 執行完之後、updateMany 執行之前，
+            // 使用者剛好對這顆座位送出訂單
+            await prisma.order.create({
+                data: {
+                    orderNo: `TKT-RACE-${Math.floor(Math.random() * 1000000)}`,
+                    userId,
+                    sessionId,
+                    status: 'pending',
+                    totalAmount: 1000,
+                    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+                    items: {
+                        create: {
+                            seatId: seat.id,
+                            ticketTypeId,
+                            price: 1000,
+                        },
+                    },
+                },
+            });
+
+            return result;
+        };
+
+        let count: number;
+        try {
+            count = await reclaimAbandonedSeatLocks();
+        } finally {
+            seatDelegate.findMany = originalFindMany;
+        }
+
+        expect(count).toBe(0);
+
+        const dbSeat = await prisma.seat.findUnique({ where: { id: seat.id } });
+        expect(dbSeat?.status).toBe('locked');
+    });
+
     it('leader lock 被佔用時第二個呼叫者應該取不到鎖', async () => {
         const results: (string | null)[] = [];
 
@@ -270,5 +474,35 @@ describe('orderExpiry worker', () => {
         // 離開後鎖必須被釋放
         const exists = await redis.exists(LEADER_LOCK_KEY);
         expect(exists).toBe(0);
+    });
+
+    it('鎖若在持有期間被別人重新取得，釋放時不應該刪掉別人的鎖', async () => {
+        const result = await withLeaderLock('instance-1', async () => {
+            // 模擬鎖在 fn 執行期間已經自然過期，並被另一個實例合法取得
+            await redis.set(
+                LEADER_LOCK_KEY,
+                'instance-2',
+                'EX',
+                config.worker.leaderLockTtlSeconds
+            );
+            return 'first-done';
+        });
+
+        expect(result).toBe('first-done');
+
+        // instance-1 的 finally 應該發現目前持有者不是自己，不能刪除
+        const current = await redis.get(LEADER_LOCK_KEY);
+        expect(current).toBe('instance-2');
+    });
+
+    it('取得 leader lock 時應該帶有 TTL，避免 worker crash 後鎖永久卡死', async () => {
+        const result = await withLeaderLock('instance-1', async () => {
+            const ttl = await redis.ttl(LEADER_LOCK_KEY);
+            expect(ttl).toBeGreaterThan(0);
+            expect(ttl).toBeLessThanOrEqual(config.worker.leaderLockTtlSeconds);
+            return 'done';
+        });
+
+        expect(result).toBe('done');
     });
 });

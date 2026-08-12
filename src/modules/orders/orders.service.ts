@@ -21,13 +21,18 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
 
     // 2. 資料庫交易：建立訂單 + 更新座位狀態
     const result = await prisma.$transaction(async (tx) => {
-        // 驗證座位是否真的被該用戶鎖定
+        // 驗證座位是否真的被該用戶鎖定，且選位鎖定尚未過期。
+        // lockedUntil 若已過，即使 DB 狀態還沒被 worker 的
+        // reclaimAbandonedSeatLocks 回收也不能再讓訂單成立，
+        // 否則會跟 worker 之間出現 TOCTOU 競態（見 Task 3 review Critical 1）：
+        // worker 讀到「已過期、無訂單依附」的座位之後、這裡才 commit 建立訂單，
+        // 兩者都以為自己是對的，結果座位被 worker 放掉但訂單仍是 pending。
         const seats = await tx.seat.findMany({
             where: {
                 id: { in: seatIds },
                 lockedBy: userId,
                 status: 'locked',
-
+                lockedUntil: { gt: new Date() },
             },
             include: {
                 ticketType: true,
@@ -40,6 +45,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
 
         const totalAmount = seats.reduce((sum, seat) => sum + Number(seat.ticketType.price), 0);
         const orderNo = `TKT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const orderExpiresAt = new Date(Date.now() + paymentTimeoutMs); // 付款時限
 
         const order = await tx.order.create({
             data: {
@@ -48,7 +54,7 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
                 sessionId,
                 status: 'pending',
                 totalAmount,
-                expiresAt: new Date(Date.now() + paymentTimeoutMs), // 付款時限
+                expiresAt: orderExpiresAt,
             }
         })
 
@@ -67,6 +73,15 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
             })
         }))
 
+        // 把座位的 lockedUntil 同步延長到訂單的付款期限，讓 DB 欄位
+        // 與 Redis TTL／訂單 expiresAt 三者保持一致（同一個交易內完成，
+        // 不會有介於「建立訂單」與「更新 lockedUntil」之間的空窗）。
+        // 這是 reclaimAbandonedSeatLocks 能安全判斷「鎖定期限是否已過」的前提，
+        // 否則 lockedUntil 會停在選位當下的舊值，跟訂單實際的保護期完全脫節。
+        await tx.seat.updateMany({
+            where: { id: { in: seatIds } },
+            data: { lockedUntil: orderExpiresAt },
+        });
 
         return {
             id: order.id,
