@@ -3,6 +3,7 @@ import { buildApp } from '../../app.js';
 import { FastifyInstance } from 'fastify';
 import prisma from '../../config/database.js';
 import redis, { closeRedis } from '../../config/redis.js';
+import config from '../../config/index.js';
 
 describe('Orders Module', () => {
     let app: FastifyInstance;
@@ -122,6 +123,13 @@ describe('Orders Module', () => {
             });
             const lockId = JSON.parse(lockRes.body).data.lockId;
 
+            // 刻意把選位鎖的 TTL 縮短，模擬「鎖快過期」的情境：
+            // 如果 createOrder 只是延長（expire）舊 TTL 而非主動重設，
+            // 這裡量到的殘餘 TTL 就會停留在很小的數字，測試就會抓到退化
+            const lockKey = `seat:lock:${seatIds[0]}`;
+            const shortenedTtl = 5;
+            await redis.expire(lockKey, shortenedTtl);
+
             // 2. 建立訂單
             const orderRes = await app.inject({
                 method: 'POST',
@@ -144,13 +152,16 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
-            const lockKey = `seat:lock:${seatIds[0]}`;
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在，
+            //    且 TTL 必須被 createOrder 主動重設回付款期限附近
+            //   （遠大於我們剛剛人為縮短的 5 秒，證明不是單純殘留的舊 TTL）
             const exists = await redis.exists(lockKey);
             expect(exists).toBe(1);
             const ttl = await redis.ttl(lockKey);
-            expect(ttl).toBeGreaterThan(0);
-            expect(ttl).toBeLessThanOrEqual(10 * 60);
+            expect(ttl).toBeGreaterThan(shortenedTtl);
+            expect(ttl).toBeLessThanOrEqual(
+                config.order.paymentTimeoutMinutes * 60
+            );
         });
 
         it('鎖定過期後建立訂單應該失敗', async () => {

@@ -91,9 +91,17 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
     // 3. 保留 seat:lock 並把 TTL 延長到付款期限
     //    訂單 pending 期間 Redis 與 DB 兩層防護必須一致，
     //    只有付款成功、使用者取消、worker 判定逾期時才刪除
+    //    用 set 而非 expire：expire 對已經過期消失的 key 是 no-op，
+    //    若原本的選位鎖剛好在這個時間點過期，不變式就會悄悄失效；
+    //    改成無條件覆寫，同時把內容換成訂單身分（原本的選位 lockId 已經 hdel 失效）
     const lockTtlSeconds = Math.ceil(paymentTimeoutMs / 1000);
     for (const seatId of seatIds) {
-        await redis.expire(`seat:lock:${seatId}`, lockTtlSeconds);
+        await redis.set(
+            `seat:lock:${seatId}`,
+            JSON.stringify({ orderId: result.id, userId, sessionId }),
+            'EX',
+            lockTtlSeconds
+        );
     }
     await redis.hdel(userLockKey, lockId);
 
