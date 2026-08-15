@@ -239,6 +239,79 @@ describe('My Tickets Module', () => {
         expect(JSON.parse(res.body).code).toBe('TICKET_NOT_FOUND');
     });
 
+    it('他人已付款的票券不應該出現在自己的列表中', async () => {
+        // 先讓 userToken 擁有一張已付款票券，確保資料庫裡真的存在
+        // 「別人的票」——否則拿掉 ownership 過濾條件也不會被抓到。
+        await createPaidOrder();
+
+        await app.inject({
+            method: 'POST',
+            url: '/api/auth/register',
+            payload: {
+                email: 'ticketowner3@example.com',
+                password: 'password123',
+            },
+        });
+        const login = await app.inject({
+            method: 'POST',
+            url: '/api/auth/login',
+            payload: {
+                email: 'ticketowner3@example.com',
+                password: 'password123',
+            },
+        });
+        const otherToken = JSON.parse(login.body).data.token;
+
+        const res = await app.inject({
+            method: 'GET',
+            url: '/api/my-tickets',
+            headers: { Authorization: `Bearer ${otherToken}` },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body).data).toEqual([]);
+    });
+
+    it('他人票券的 qrcode 端點應該回 404 而不是回傳簽章內容', async () => {
+        // 同樣先確保資料庫裡有一張「別人的」已付款票券（含 ticketCode/qrCode），
+        // 這樣如果 ownership 過濾被拿掉，這張票的簽章就會外洩給別人。
+        await createPaidOrder();
+
+        const listRes = await app.inject({
+            method: 'GET',
+            url: '/api/my-tickets',
+            headers: { Authorization: `Bearer ${userToken}` },
+        });
+        const ticketId = JSON.parse(listRes.body).data[0].ticketId;
+
+        await app.inject({
+            method: 'POST',
+            url: '/api/auth/register',
+            payload: {
+                email: 'ticketowner4@example.com',
+                password: 'password123',
+            },
+        });
+        const login = await app.inject({
+            method: 'POST',
+            url: '/api/auth/login',
+            payload: {
+                email: 'ticketowner4@example.com',
+                password: 'password123',
+            },
+        });
+        const otherToken = JSON.parse(login.body).data.token;
+
+        const res = await app.inject({
+            method: 'GET',
+            url: `/api/my-tickets/${ticketId}/qrcode`,
+            headers: { Authorization: `Bearer ${otherToken}` },
+        });
+
+        expect(res.statusCode).toBe(404);
+        expect(JSON.parse(res.body).code).toBe('TICKET_NOT_FOUND');
+    });
+
     it('qrcode 端點回傳的簽章應該可驗證通過，且內容與資料庫儲存值一致', async () => {
         await createPaidOrder();
 
