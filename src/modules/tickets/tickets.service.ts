@@ -334,6 +334,19 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
 
     const { seatIds } = JSON.parse(lockData);
 
+    // 1.5 單次性原子宣告：HDEL 是原子操作且會回傳實際刪除的欄位數，
+    // 這裡與 createOrder 對同一個 lockId 競爭同一把 hash 欄位——
+    // 只有先搶到的那個能拿到 1，另一個拿到 0。拿到 0 代表這個 lockId
+    // 已經被另一次呼叫（多半是 createOrder）消費掉，必須視為「鎖不存在」
+    // 直接失敗，而不是繼續用剛剛讀到、可能已經過期的 lockData 去動座位。
+    // 這是 N2 的根源：DELETE /api/tickets/lock/:lockId 與
+    // POST /api/orders 若各自只用 hget 判斷，兩者可能都讀到刪除前的
+    // 同一筆記錄而各自認為自己合法持有這批座位。
+    const claimed = await redis.hdel(userLockKey, lockId);
+    if (claimed === 0) {
+        throw new AppError('找不到鎖定記錄', 404, 'LOCK_NOT_FOUND');
+    }
+
     // 2. 釋放 Redis 鎖
     for (const seatId of seatIds) {
         const lockKey = `seat:lock:${seatId}`;
@@ -348,13 +361,24 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
         }
     }
 
-    // 3. 更新資料庫
+    // 3. 更新資料庫：只釋放實際仍被本人以「選位中」狀態持有、且沒有任何
+    // pending/paid 訂單依附的座位。光加 status: 'locked' 不夠——座位一旦
+    // 被 createOrder 接手，status 仍然是 locked，唯一能分辨「還在選位」
+    // 跟「已經是訂單」的方式是這個關聯條件（與 orderExpiry.service.ts 的
+    // buildAbandonedSeatFilter 同一個道理）。上面的原子宣告已經讓正常的
+    // API 併發路徑不可能走到這裡還命中一張活訂單，這裡是第二道防線。
     await prisma.seat.updateMany({
         where: {
             id: {
                 in: seatIds,
             },
+            status: 'locked',
             lockedBy: userId,
+            orderItems: {
+                none: {
+                    order: { status: { in: ['pending', 'paid'] } },
+                },
+            },
         },
         data: {
             status: 'available',
@@ -362,9 +386,6 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
             lockedBy: null,
         },
     });
-
-    // 4. 移除用戶鎖定記錄
-    await redis.hdel(userLockKey, lockId);
 }
 
 // 取得用戶的鎖定座位

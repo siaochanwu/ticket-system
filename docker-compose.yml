@@ -13,8 +13,8 @@ services:
       - DATABASE_URL=postgresql://tickets:tickets@postgres:5432/tickets
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
-      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
-      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:-change-me-in-production}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:?PAYMENT_MOCK_SECRET is required}
       - PAYMENT_CALLBACK_BASE_URL=${PAYMENT_CALLBACK_BASE_URL:-http://localhost:3000}
       - ORDER_PAYMENT_TIMEOUT_MINUTES=10
       - REFUND_DEADLINE_DAYS=7
@@ -47,8 +47,8 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://tickets:tickets@postgres:5432/tickets
       - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
-      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:-change-me-in-production}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:?PAYMENT_MOCK_SECRET is required}
       - ORDER_PAYMENT_TIMEOUT_MINUTES=10
       - ORDER_EXPIRY_INTERVAL_MS=30000
       - ORDER_EXPIRY_LOCK_TTL_SECONDS=25

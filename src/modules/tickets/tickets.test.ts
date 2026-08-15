@@ -610,6 +610,60 @@ describe('Tickets Module', () => {
             expect(response.statusCode).toBe(404);
             expect(body.code).toBe('LOCK_NOT_FOUND');
         });
+
+        it('user:locks 記錄若在下單後被重新植入，不應該釋放已被 pending 訂單持有的座位（N2 回歸測試）', async () => {
+            // 使用者鎖位並下單：createOrder 現在會用原子 HDEL 搶先消費掉
+            // 這筆 user:locks 記錄
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            expect(orderRes.statusCode).toBe(201);
+
+            // 手動把這筆已經被消費掉的 user:locks 記錄植回去，模擬 N2
+            // 描述的競態情境：unlockSeats 若只靠 hget 判斷，會誤以為
+            // 自己仍合法持有這批座位（此刻座位其實已經是一張 pending
+            // 訂單的一部分）
+            const userLockKey = `user:locks:${userId}`;
+            await redis.hset(
+                userLockKey,
+                lockId,
+                JSON.stringify({
+                    sessionId,
+                    seatIds: [seatIds[0]],
+                    expiresAt: new Date(Date.now() + 600000).toISOString(),
+                })
+            );
+
+            const response = await app.inject({
+                method: 'DELETE',
+                url: `/api/tickets/lock/${lockId}`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            // 原子宣告本身會成功（手動植回了記錄，HDEL 拿得到 1），
+            // 但座位層的關聯守衛必須擋下實際的 DB 寫入
+            expect(response.statusCode).toBe(200);
+
+            const seat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+            expect(seat?.status).toBe('locked');
+            expect(seat?.lockedBy).toBe(userId);
+
+            await prisma.orderItem.deleteMany({});
+            await prisma.order.deleteMany({});
+        });
     });
 
     // 取得我的鎖定座位測試

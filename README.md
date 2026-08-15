@@ -87,6 +87,6 @@ npm run worker:start  # 編譯後執行
 1. **Redis 座位鎖**（`seat:lock:{seatId}`）：搶位當下即時卡位，TTL 對齊訂單付款期限。
 2. **DB 座位狀態**（`seats.status = 'locked'`）：`lockSeats` 會在同一次交易中檢查座位狀態並在 `updateMany` 加上 `status = 'available'` 的守衛條件，確保「先查後寫」不會被併發請求繞過，座位不會被兩張訂單同時持有。
 
-只有付款成功、使用者取消、worker 判定訂單逾期（`expireOverdueOrders`）三種情況會刪除 Redis 座位鎖，三者共用同一個「比對持有者後才刪」的 `releaseSeatLockIfOwnedBy`。孤兒座位鎖回收（`reclaimAbandonedSeatLocks`）只處理 DB 座位狀態，刻意不動 Redis。
+會刪除 Redis 座位鎖的情況共有五種：付款成功、使用者取消訂單、worker 判定訂單逾期（`expireOverdueOrders`）、使用者主動釋放選位（`DELETE /api/tickets/lock/:lockId`，`unlockSeats`），以及 `lockSeats` 選位失敗時的回滾。前三者共用同一個「比對持有者後才刪」的 `releaseSeatLockIfOwnedBy`；`unlockSeats` 與 `lockSeats` 回滾走的是同一個原則，各自內建同款比對邏輯。孤兒座位鎖回收（`reclaimAbandonedSeatLocks`）只處理 DB 座位狀態，刻意不動 Redis。
 
 ---

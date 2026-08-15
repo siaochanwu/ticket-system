@@ -18,6 +18,19 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
 
     const { sessionId, seatIds, expiresAt } = JSON.parse(lockData);
 
+    // 1.5 單次性原子宣告：把消費這筆 lockId 的動作搬到這裡，並比對 HDEL
+    // 實際刪除的欄位數。HDEL 是原子操作，這裡與 unlockSeats 對同一個
+    // lockId 競爭同一把 hash 欄位——只有先搶到的一方能拿到 1，另一方拿到
+    // 0 就必須在這裡失敗，不能繼續用剛剛讀到的 lockData 建立訂單。這是
+    // N2 的根源：DELETE /api/tickets/lock/:lockId 與 POST /api/orders
+    // 若各自只用 hget 判斷，兩者可能都讀到刪除前的同一筆記錄，各自以為
+    // 自己合法持有這批座位，其中一個就會在一個座位其實仍是 pending
+    // 訂單持有時把它放回 available。
+    const claimed = await redis.hdel(userLockKey, lockId);
+    if (claimed === 0) {
+        throw new AppError('選位鎖定已過期或不存在', 400, 'LOCK_EXPIRED');
+    }
+
     const paymentTimeoutMs = config.order.paymentTimeoutMinutes * 60 * 1000;
 
     // 2. 資料庫交易：建立訂單 + 更新座位狀態
@@ -119,7 +132,8 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
     //    只有付款成功、使用者取消、worker 判定逾期時才刪除
     //    用 set 而非 expire：expire 對已經過期消失的 key 是 no-op，
     //    若原本的選位鎖剛好在這個時間點過期，不變式就會悄悄失效；
-    //    改成無條件覆寫，同時把內容換成訂單身分（原本的選位 lockId 已經 hdel 失效）
+    //    改成無條件覆寫，同時把內容換成訂單身分
+    //    （原本的選位 lockId 在步驟 1.5 已經 hdel 消費掉了）
     const lockTtlSeconds = Math.ceil(paymentTimeoutMs / 1000);
     for (const seatId of seatIds) {
         await redis.set(
@@ -129,7 +143,6 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
             lockTtlSeconds
         );
     }
-    await redis.hdel(userLockKey, lockId);
 
     return result;
 }
