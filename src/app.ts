@@ -16,6 +16,7 @@ import eventsRoutes from './modules/events/events.routes.js';
 import ticketsRoutes from './modules/tickets/tickets.routes.js';
 import ordersRoutes from './modules/orders/orders.routes.js';
 import paymentsRoutes from './modules/payments/payments.routes.js';
+import myTicketsRoutes from './modules/my-tickets/my-tickets.routes.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
     const app = Fastify({
@@ -64,6 +65,7 @@ export async function buildApp(): Promise<FastifyInstance> {
                 { name: 'tickets', description: '票券相關' },
                 { name: 'orders', description: '訂單相關' },
                 { name: 'payments', description: '付款相關' },
+                { name: 'my-tickets', description: '電子票券' },
             ],
             securityDefinitions: {
                 Bearer: {
@@ -127,6 +129,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     await app.register(ticketsRoutes, { prefix: '/api/tickets' });
     await app.register(ordersRoutes, { prefix: '/api/orders' });
     await app.register(paymentsRoutes, { prefix: '/api/payments' });
+    await app.register(myTicketsRoutes, { prefix: '/api/my-tickets' });
 
     return app;
 }
