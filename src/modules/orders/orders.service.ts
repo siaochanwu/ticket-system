@@ -3,6 +3,7 @@ import redis from '../../config/redis.js';
 import { AppError, Errors } from '../../plugins/errorHandler.js';
 import config from '../../config/index.js';
 import { CreateOrderInput, OrderResponse, OrdersResponse } from './orders.type.js';
+import { releaseSeatLockIfOwnedBy } from '../../workers/orderExpiry.service.js';
 
 export async function createOrder(input: CreateOrderInput): Promise<OrderResponse> {
     const { userId, lockId } = input;
@@ -238,9 +239,11 @@ export async function getOrderById(userId: string, orderId: string): Promise<Ord
 }
 
 export async function cancelOrder(userId: string, orderId: string): Promise<OrderResponse> {
-    // 只有pending 狀態可以取消
-    // 改狀態 -> cancelled
-    // 解鎖座位
+    // 這裡的讀取只是為了取得 items（釋放座位要用的 seatId）與確認訂單
+    // 存在／屬於這個 user，讀到的 status 不能當成唯一防線——如果取消請求
+    // 在讀取之後、交易 commit 之前，剛好有一筆付款 commit 成功，這個讀取結果
+    // 就已經是過期的了。真正擋雙賣的守衛在下面交易內的 updateMany where 條件
+    // （見 task-4.5：可兌現雙賣 Critical）。
     const order = await prisma.order.findFirst({
         where: {
             id: orderId,
@@ -255,43 +258,39 @@ export async function cancelOrder(userId: string, orderId: string): Promise<Orde
         throw Errors.ORDER_NOT_FOUND;
     }
 
-    if (order.status !== 'pending') {
-        throw new AppError('只能取消待付款的訂單', 400, 'ORDER_CANNOT_CANCEL')
-    }
+    const seatIds = order.items.map(item => item.seatId);
 
     // 取消訂單與釋放座位
     const result = await prisma.$transaction(async (tx) => {
-        // 1. 更新訂單狀態
-        const updatedOrder = await tx.order.update({
+        // 1. 更新訂單狀態：where 重新斷言 status: 'pending' 並比對 count，
+        //    與 expireOverdueOrders／付款成功路徑同一個模式。count 不是 1
+        //    代表訂單在交易外的讀取之後已經被別的流程（最主要是付款）
+        //    改動過，必須整批放棄，否則會把 paid 覆寫成 cancelled，
+        //    座位翻回 available，但已簽發的 ticketCode/qrCode 仍然有效
+        //    ——可兌現的雙重銷售。
+        const cancelled = await tx.order.updateMany({
             where: {
                 id: orderId,
+                userId,
+                status: 'pending',
             },
             data: {
                 status: 'cancelled',
             },
-            include: {
-                session: {
-                    include: {
-                        event: true
-                    }
-                },
-                items: {
-                    include: {
-                        seat: true,
-                        ticketType: true,
-                    }
-                }
-            }
         })
-        // 2. 取出所有這個訂單佔用的座位 ID
-        const seatIds = order.items.map(item => item.seatId);
 
-        // 3. 解鎖座位
+        if (cancelled.count !== 1) {
+            throw new AppError('只能取消待付款的訂單', 400, 'ORDER_CANNOT_CANCEL')
+        }
+
+        // 2. 解鎖座位：只釋放仍是 locked 且 lockedBy 為本人的座位，避免動到
+        //    已經被付款流程改成 sold 的座位（與 orderExpiry 的
+        //    expireOverdueOrders 同一個守衛模式）
         await tx.seat.updateMany({
             where: {
-                id: {
-                    in: seatIds
-                }
+                id: { in: seatIds },
+                status: 'locked',
+                lockedBy: userId,
             },
             data: {
                 status: 'available',
@@ -300,12 +299,24 @@ export async function cancelOrder(userId: string, orderId: string): Promise<Orde
             }
         })
 
-        return updatedOrder;
+        return tx.order.findUniqueOrThrow({
+            where: { id: orderId },
+            include: {
+                items: {
+                    include: {
+                        seat: true,
+                        ticketType: true,
+                    }
+                }
+            }
+        })
     })
 
-    // 訂單已取消，釋放 Redis 座位鎖
-    for (const item of order.items) {
-        await redis.del(`seat:lock:${item.seatId}`);
+    // 訂單已取消，釋放 Redis 座位鎖：比對持有者後才刪，與 worker
+    // （releaseSeatLockIfOwnedBy）／付款成功路徑一致，避免刪掉 commit 之後
+    // 才由別人合法取得的新鎖
+    for (const seatId of seatIds) {
+        await releaseSeatLockIfOwnedBy(seatId, userId);
     }
 
     return {

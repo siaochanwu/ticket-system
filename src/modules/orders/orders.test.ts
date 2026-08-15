@@ -4,6 +4,7 @@ import { FastifyInstance } from 'fastify';
 import prisma from '../../config/database.js';
 import redis, { closeRedis } from '../../config/redis.js';
 import config from '../../config/index.js';
+import { cancelOrder } from './orders.service.js';
 
 describe('Orders Module', () => {
     let app: FastifyInstance;
@@ -404,6 +405,159 @@ describe('Orders Module', () => {
 
             expect(secondRes.statusCode).toBe(400);
             expect(JSON.parse(secondRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+        });
+
+        it('已付款訂單不應該能取消，且不得動到座位與票券（可兌現雙賣回歸測試）', async () => {
+            // 直接把資料組成「已付款」狀態：座位 sold、OrderItem 已簽發
+            // ticketCode/qrCode。比等待真正的付款流程更穩定地重現
+            // 「cancel 讀到 pending 之後、commit 之前剛好有付款成功」的後果。
+            const order = await prisma.order.create({
+                data: {
+                    orderNo: `TKT-PAID-${Date.now()}`,
+                    userId,
+                    sessionId,
+                    status: 'paid',
+                    totalAmount: 1000,
+                    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+                    paidAt: new Date(),
+                },
+            });
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            await prisma.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    seatId: seatIds[0],
+                    ticketTypeId,
+                    price: 1000,
+                    ticketCode: 'TIX-ALREADY-ISSUED',
+                    qrCode: 'QR-ALREADY-ISSUED',
+                },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${order.id}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(400);
+            expect(JSON.parse(cancelRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: order.id } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
+
+            const dbItem = await prisma.orderItem.findFirst({ where: { orderId: order.id } });
+            expect(dbItem?.ticketCode).not.toBeNull();
+            expect(dbItem?.qrCode).not.toBeNull();
+        });
+
+        it('讀取當下是 pending、交易前才被改成 paid 的取消也必須失敗（不能只靠交易外的前置檢查）', async () => {
+            // 先走正常流程建立一筆貨真價實的 pending 訂單，取得 orderId
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 在同一個測試內模擬「取消讀到 pending 之後、交易 commit 之前，
+            // 付款搶先 commit」：直接把它改成已付款
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            const orderItem = await prisma.orderItem.findFirstOrThrow({
+                where: { orderId },
+            });
+            await prisma.orderItem.update({
+                where: { id: orderItem.id },
+                data: { ticketCode: 'TIX-RACE', qrCode: 'QR-RACE' },
+            });
+            await prisma.order.update({
+                where: { id: orderId },
+                data: { status: 'paid', paidAt: new Date() },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(400);
+            expect(JSON.parse(cancelRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: orderId } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
+
+            const dbItem = await prisma.orderItem.findUnique({ where: { id: orderItem.id } });
+            expect(dbItem?.ticketCode).not.toBeNull();
+            expect(dbItem?.qrCode).not.toBeNull();
+        });
+
+        it('service 層 cancelOrder 必須靠交易內的 where 守衛擋下已付款訂單（拿掉守衛此測試必須變紅）', async () => {
+            // 繞過 HTTP 層，直接呼叫 service，確保守衛真的長在交易內部，
+            // 而不是恰好被前面某一層的前置檢查擋下
+            const order = await prisma.order.create({
+                data: {
+                    orderNo: `TKT-PAID-SVC-${Date.now()}`,
+                    userId,
+                    sessionId,
+                    status: 'pending',
+                    totalAmount: 1000,
+                    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+                },
+            });
+            await prisma.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    seatId: seatIds[0],
+                    ticketTypeId,
+                    price: 1000,
+                },
+            });
+
+            // 呼叫 cancelOrder 之前才把訂單改成 paid（模擬讀取後才 commit 的付款）
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            await prisma.orderItem.updateMany({
+                where: { orderId: order.id },
+                data: { ticketCode: 'TIX-SVC-DIRECT', qrCode: 'QR-SVC-DIRECT' },
+            });
+            await prisma.order.update({
+                where: { id: order.id },
+                data: { status: 'paid', paidAt: new Date() },
+            });
+
+            await expect(cancelOrder(userId, order.id)).rejects.toMatchObject({
+                code: 'ORDER_CANNOT_CANCEL',
+            });
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: order.id } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
         });
     });
 
