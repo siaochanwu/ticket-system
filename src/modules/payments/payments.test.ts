@@ -231,6 +231,26 @@ describe('Payments Module', () => {
             expect(res.statusCode).toBe(410);
             expect(JSON.parse(res.body).code).toBe('ORDER_EXPIRED');
         });
+
+        it('已付款完成的訂單不應該能再建立付款', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: callbackPayload(
+                    body.data.transactionId,
+                    'success',
+                    '1000'
+                ),
+            });
+
+            const { res } = await createPayment(orderId);
+
+            expect(res.statusCode).toBe(409);
+            expect(JSON.parse(res.body).code).toBe('ORDER_ALREADY_PAID');
+        });
     });
 
     describe('POST /api/payments/callback/mock', () => {
@@ -246,6 +266,55 @@ describe('Payments Module', () => {
                     status: 'success',
                     amount: '1000',
                     signature: 'deadbeef',
+                },
+            });
+
+            expect(res.statusCode).toBe(401);
+            expect(JSON.parse(res.body).code).toBe('INVALID_SIGNATURE');
+        });
+
+        it('正確長度但錯誤的簽章應該回 401（確保真的有跑 timingSafeEqual 比較，不只是長度早退）', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            const good = signCallback(body.data.transactionId, 'success', '1000');
+            // 長度不變，只改最後一個字元，確保會進到 timingSafeEqual 那一行
+            const bad = good.slice(0, -1) + (good.endsWith('0') ? '1' : '0');
+
+            const res = await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: {
+                    transactionId: body.data.transactionId,
+                    status: 'success',
+                    amount: '1000',
+                    signature: bad,
+                },
+            });
+
+            expect(res.statusCode).toBe(401);
+            expect(JSON.parse(res.body).code).toBe('INVALID_SIGNATURE');
+        });
+
+        it('簽章綁定的欄位被竄改應該回 401（證明簽章真的綁定了 status／amount）', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            // 用 amount='1' 算出來的合法簽章，套用在 amount='1000' 的 body 上
+            const signatureForDifferentAmount = signCallback(
+                body.data.transactionId,
+                'success',
+                '1'
+            );
+
+            const res = await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: {
+                    transactionId: body.data.transactionId,
+                    status: 'success',
+                    amount: '1000',
+                    signature: signatureForDifferentAmount,
                 },
             });
 
@@ -344,6 +413,7 @@ describe('Payments Module', () => {
 
             const first = await prisma.order.findUnique({
                 where: { id: orderId },
+                include: { items: true },
             });
 
             const res = await app.inject({
@@ -357,10 +427,72 @@ describe('Payments Module', () => {
 
             const second = await prisma.order.findUnique({
                 where: { id: orderId },
+                include: { items: true },
             });
             expect(second?.paidAt?.toISOString()).toBe(
                 first?.paidAt?.toISOString()
             );
+
+            // 重複套用最貴的副作用是重新簽發票券：確保每個 orderItem 的
+            // ticketCode／qrCode 在兩次回調之間完全沒變，而不是恰巧簽出
+            // 同一組值
+            const firstCodes = first!.items
+                .map((item) => `${item.id}:${item.ticketCode}:${item.qrCode}`)
+                .sort();
+            const secondCodes = second!.items
+                .map((item) => `${item.id}:${item.ticketCode}:${item.qrCode}`)
+                .sort();
+            expect(secondCodes).toEqual(firstCodes);
+        });
+
+        it('併發抵達的相同成功回調應該只有一個真正套用，另一個走冪等路徑（不重複簽發票券）', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+            const payload = callbackPayload(
+                body.data.transactionId,
+                'success',
+                '1000'
+            );
+
+            const [resA, resB] = await Promise.all([
+                app.inject({
+                    method: 'POST',
+                    url: '/api/payments/callback/mock',
+                    payload,
+                }),
+                app.inject({
+                    method: 'POST',
+                    url: '/api/payments/callback/mock',
+                    payload,
+                }),
+            ]);
+
+            expect(resA.statusCode).toBe(200);
+            expect(resB.statusCode).toBe(200);
+
+            const duplicatedFlags = [resA, resB].map(
+                (r) => JSON.parse(r.body).data.duplicated
+            );
+            // 兩個併發回調剛好一個是真正套用（false）、一個是冪等重放（true）：
+            // 若原子 claim 失效，兩個都可能是 false，各自重新簽發一次票券
+            expect(duplicatedFlags.filter((d) => d === false)).toHaveLength(1);
+            expect(duplicatedFlags.filter((d) => d === true)).toHaveLength(1);
+
+            const order = await prisma.order.findUnique({
+                where: { id: orderId },
+                include: { items: true },
+            });
+            expect(order?.status).toBe('paid');
+
+            for (const item of order!.items) {
+                expect(item.ticketCode).toMatch(/^TKT-[0-9A-F]{12}$/);
+                expect(verifyTicket(item.qrCode!, item.id)).toBe(true);
+            }
+
+            const payment = await prisma.payment.findUnique({
+                where: { id: body.data.paymentId },
+            });
+            expect(payment?.status).toBe('success');
         });
 
         it('失敗回調應該把付款標記 failed 且訂單維持 pending', async () => {
@@ -445,6 +577,89 @@ describe('Payments Module', () => {
             });
             expect(order?.status).toBe('pending');
         });
+
+        it('已取消的訂單收到成功回調時，付款應標記 failed 並回 410', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            const res = await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: callbackPayload(
+                    body.data.transactionId,
+                    'success',
+                    '1000'
+                ),
+            });
+
+            expect(res.statusCode).toBe(410);
+            expect(JSON.parse(res.body).code).toBe('ORDER_EXPIRED');
+
+            const payment = await prisma.payment.findUnique({
+                where: { id: body.data.paymentId },
+            });
+            expect(payment?.status).toBe('failed');
+
+            const order = await prisma.order.findUnique({
+                where: { id: orderId },
+            });
+            expect(order?.status).toBe('cancelled');
+        });
+
+        it('訂單已被另一筆付款完成時，另一筆付款收到成功回調應標記 failed 並回 409', async () => {
+            const orderId = await createPendingOrder();
+            const paymentA = await createPayment(orderId);
+
+            const resA = await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: callbackPayload(
+                    paymentA.body.data.transactionId,
+                    'success',
+                    '1000'
+                ),
+            });
+            expect(resA.statusCode).toBe(200);
+
+            // 訂單付款完成之後才直接寫入另一筆孤兒 pending 付款（例如舊版
+            // createPayment 沒有防併發保護時留下的紀錄）。此時 payment A
+            // 已經轉成 success，partial unique index
+            // （payments_order_id_pending_key：同一訂單同時只能有一筆
+            // pending 付款）不會擋下這筆 insert。
+            const paymentB = await prisma.payment.create({
+                data: {
+                    orderId,
+                    paymentMethod: 'mock',
+                    transactionId: `MOCK-TEST-ORPHAN-${Date.now()}`,
+                    amount: 1000,
+                    status: 'pending',
+                },
+            });
+
+            const resB = await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: callbackPayload(
+                    paymentB.transactionId!,
+                    'success',
+                    '1000'
+                ),
+            });
+
+            expect(resB.statusCode).toBe(409);
+            expect(JSON.parse(resB.body).code).toBe('ORDER_ALREADY_PAID');
+
+            const updatedB = await prisma.payment.findUnique({
+                where: { id: paymentB.id },
+            });
+            expect(updatedB?.status).toBe('failed');
+        });
     });
 
     describe('GET /api/payments/:paymentId/status', () => {
@@ -463,6 +678,72 @@ describe('Payments Module', () => {
             expect(statusBody.data.status).toBe('pending');
             expect(statusBody.data.orderStatus).toBe('pending');
             expect(statusBody.data.amount).toBe('1000');
+        });
+
+        it('查詢別人的付款狀態應該回 404', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            await app.inject({
+                method: 'POST',
+                url: '/api/auth/register',
+                payload: {
+                    email: 'payuser3@example.com',
+                    password: 'password123',
+                },
+            });
+            const login = await app.inject({
+                method: 'POST',
+                url: '/api/auth/login',
+                payload: {
+                    email: 'payuser3@example.com',
+                    password: 'password123',
+                },
+            });
+            const otherToken = JSON.parse(login.body).data.token;
+
+            const res = await app.inject({
+                method: 'GET',
+                url: `/api/payments/${body.data.paymentId}/status`,
+                headers: { Authorization: `Bearer ${otherToken}` },
+            });
+
+            expect(res.statusCode).toBe(404);
+            expect(JSON.parse(res.body).code).toBe('PAYMENT_NOT_FOUND');
+
+            await prisma.user.deleteMany({
+                where: { email: 'payuser3@example.com' },
+            });
+        });
+    });
+
+    describe('verifyTicket 的否定案例', () => {
+        it('不同的 orderItemId 或被竄改的 payload 都不應該通過驗證', async () => {
+            const orderId = await createPendingOrder();
+            const { body } = await createPayment(orderId);
+
+            await app.inject({
+                method: 'POST',
+                url: '/api/payments/callback/mock',
+                payload: callbackPayload(
+                    body.data.transactionId,
+                    'success',
+                    '1000'
+                ),
+            });
+
+            const order = await prisma.order.findUnique({
+                where: { id: orderId },
+                include: { items: true },
+            });
+            const item = order!.items[0];
+
+            // 一位使用者的 QR 不應該通過另一張票（不同 orderItemId）的驗證
+            expect(verifyTicket(item.qrCode!, item.id + 999999)).toBe(false);
+            // 竄改過的 payload 不應該通過驗證
+            expect(verifyTicket(`${item.qrCode!}tampered`, item.id)).toBe(
+                false
+            );
         });
     });
 });

@@ -11,7 +11,7 @@ export const LEADER_LOCK_KEY = 'worker:lock:order-expiry';
  * （DB 交易 commit 之後、這裡執行之前，若原 key 剛好自然過期，
  *  別人是可以完整跑完一次 lockSeats 拿到新鎖的）。
  */
-async function releaseSeatLockIfOwnedBy(
+export async function releaseSeatLockIfOwnedBy(
     seatId: number,
     ownerUserId: string
 ): Promise<void> {

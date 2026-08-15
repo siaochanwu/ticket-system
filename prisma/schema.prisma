@@ -57,7 +57,7 @@ model Payment {
   id            String   @id @default(uuid())
   orderId       String   @map("order_id")
   paymentMethod String?  @map("payment_method")
-  transactionId String?  @map("transaction_id")
+  transactionId String?  @unique @map("transaction_id")
   amount        Decimal  @db.Decimal(10, 2)
   status        String   @default("pending")
   rawResponse   Json?    @map("raw_response")

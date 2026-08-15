@@ -29,6 +29,12 @@ export function verifyCallbackSignature(
     amount: string,
     signature: string
 ): boolean {
+    // 這個函式是 export 出去的，不能只依賴呼叫端（route schema）保證型別；
+    // 自己也要能安全拒絕非字串輸入，而不是讓 Buffer.from 拋例外
+    if (typeof signature !== 'string') {
+        return false;
+    }
+
     const expected = signCallback(transactionId, status, amount);
 
     const actualBuffer = Buffer.from(signature);
