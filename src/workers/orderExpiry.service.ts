@@ -112,8 +112,10 @@ export async function expireOverdueOrders(
 // pending 交給 expireOverdueOrders 處理；paid 則是防禦性排除——
 // 目前 repo 還沒有付款模組，一旦加入後若 order→paid 與 seat→sold
 // 沒有包在同一個交易內，中間態就會是 order.status='paid' 但
-// seat.status 仍是 'locked'，此時 lockedUntil 也早已過期（見下方
-// reclaimAbandonedSeatLocks 的說明），不能被這個 worker 誤放。
+// seat.status 仍是 'locked'。無論這個當下 seat.lockedUntil 是否已過
+//（createOrder 會把它同步到 order.expiresAt，正常付款發生在
+// expiresAt 之前，這時通常還沒過），都必須靠訂單狀態本身把它排除，
+// 不能依賴 lockedUntil 與訂單保護期之間的任何推論。
 const SEAT_PROTECTED_ORDER_STATUSES = ['pending', 'paid'];
 
 function buildAbandonedSeatFilter(now: Date) {
@@ -142,11 +144,15 @@ function buildAbandonedSeatFilter(now: Date) {
  * 那一步仍會被放掉——即使那張訂單其實還活著。共用同一個 filter 讓兩處
  * 不可能再次各自漂移。
  *
- * 注意：「lockedUntil 已過」不代表「Redis 鎖已經消失」。createOrder 下單時
- * 會把 Redis TTL 延長到付款期限，但不會同步更新 seats.lockedUntil，
- * 所以「lockedUntil 已過、但 Redis 鎖仍活著、訂單仍是 pending」在付款期間
- * 中段是常態而非邊角案例。真正保護這些座位不被誤放的，是上面的
- * pending／paid 訂單 filter，不是 lockedUntil 與 Redis TTL 之間的任何推論。
+ * 注意：createOrder 會在同一交易內把 seat.lockedUntil 延長到
+ * order.expiresAt，並拒絕 lockedUntil 已過的座位，所以正常情況下
+ * pending 訂單的座位不會落進這個 filter（`lockedUntil < now` 根本不成立）。
+ * 即便如此，這裡的寫入仍必須帶上完整的訂單狀態 filter——那才是最後一道
+ * 防線，不能靠 lockedUntil 與訂單保護期之間的任何推論：createOrder 與
+ * 這個函式各自的 findMany／updateMany 之間仍有毫秒級的 TOCTOU 窗口
+ * （由 createOrder 那一側同一個交易內的座位列更新負責擋下，見
+ * orders.service.ts 的 relocked 守衛），真正兜底的是上面的
+ * pending／paid 訂單 filter 本身。
  *
  * 這裡刻意不刪 Redis 的 seat:lock：符合條件的座位可能根本沒有存活的
  * Redis 鎖（早已自然過期），盲目刪除反而可能誤刪別的使用者剛合法取得的新鎖。

@@ -78,10 +78,20 @@ export async function createOrder(input: CreateOrderInput): Promise<OrderRespons
         // 不會有介於「建立訂單」與「更新 lockedUntil」之間的空窗）。
         // 這是 reclaimAbandonedSeatLocks 能安全判斷「鎖定期限是否已過」的前提，
         // 否則 lockedUntil 會停在選位當下的舊值，跟訂單實際的保護期完全脫節。
-        await tx.seat.updateMany({
-            where: { id: { in: seatIds } },
+        //
+        // 帶上與上面查詢相同的 status／lockedBy 條件並比對筆數：如果在
+        // 「查詢座位」與「這次更新」之間，座位已經被 worker 的
+        // reclaimAbandonedSeatLocks 搶先放掉（時間窗極窄，但仍是同一種
+        // TOCTOU），這裡會偵測到筆數不符並讓交易整批回滾，而不是在一顆
+        // 已經 available 的座位上寫入沒有意義的 lockedUntil。
+        const relocked = await tx.seat.updateMany({
+            where: { id: { in: seatIds }, status: 'locked', lockedBy: userId },
             data: { lockedUntil: orderExpiresAt },
         });
+
+        if (relocked.count !== seatIds.length) {
+            throw new AppError('座位狀態變更，請重新選擇', 400, 'SEAT_UNAVAILABLE')
+        }
 
         return {
             id: order.id,

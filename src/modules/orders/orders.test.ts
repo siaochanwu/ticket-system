@@ -177,6 +177,42 @@ describe('Orders Module', () => {
             const body = JSON.parse(response.body);
             expect(body.code).toBe('LOCK_EXPIRED');
         });
+
+        it('建立訂單時應該把座位的 lockedUntil 同步延長到訂單的付款期限（回歸測試）', async () => {
+            // 1. 先鎖定座位
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            // 2. 建立訂單
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            const dbOrder = await prisma.order.findUnique({
+                where: { id: orderId },
+            });
+            const dbSeat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+
+            // 必須精確等於訂單的付款期限，而不只是「還沒過期」——
+            // 選位當下寫入的舊 lockedUntil（10 分鐘後）若測試跑得夠快，
+            // 此時也還沒過期，用「還沒過期」這種寬鬆斷言會漏掉
+            // createOrder 忘記同步這個欄位的迴歸（見 Task 3 re-review 第 2 點）
+            expect(dbSeat?.lockedUntil).not.toBeNull();
+            expect(dbSeat?.lockedUntil?.getTime()).toBe(
+                dbOrder?.expiresAt.getTime()
+            );
+        });
     })
 
     describe('GET /api/orders', () => {

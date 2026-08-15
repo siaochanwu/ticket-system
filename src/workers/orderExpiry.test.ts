@@ -267,9 +267,14 @@ describe('orderExpiry worker', () => {
     });
 
     it('批次中有一筆處理失敗，不應該中斷其餘訂單的回收', async () => {
-        // expiresAt 越早代表越舊，依 orderBy: asc 會被排在前面先處理
-        const early = await createOrder(new Date(Date.now() - 5000));
+        // 刻意讓「插入順序」與「expiresAt 順序」相反：先插入的 later 比較新，
+        // 後插入的 early 比較舊。若拿掉 orderBy: { expiresAt: 'asc' }，
+        // Postgres 對小表通常照插入順序（heap scan）回傳，此時第一筆會是
+        // later 而不是 early，下面對 early／later 最終狀態的斷言就會失敗——
+        // 藉此讓「orderBy 真的有依 expiresAt 排序」這件事被測出來，
+        // 而不是像插入序＝到期序時，拿掉 orderBy 也可能剛好照樣通過。
         const later = await createOrder(new Date(Date.now() - 1000));
+        const early = await createOrder(new Date(Date.now() - 5000));
 
         const originalTransaction = prisma.$transaction.bind(prisma);
         let callCount = 0;
@@ -306,12 +311,20 @@ describe('orderExpiry worker', () => {
         // 用較小的 batchSize（而非 config 預設的 100）大幅降低本測試的
         // fixture 成本，避免在 CI 上跟 testTimeout 賽跑
         const batchSize = 3;
+        const total = batchSize + 2;
         const created: Awaited<ReturnType<typeof createOrder>>[] = [];
 
-        for (let i = 0; i < batchSize + 2; i += 1) {
-            // expiresAt 依序遞增，index 越小代表越早過期（越舊）
+        for (let i = 0; i < total; i += 1) {
+            // 插入順序刻意與 expiresAt 順序相反：先插入的 i 越小、expiresAt
+            // 越晚（越新、越不逾期）；後插入的 i 越大、expiresAt 越早
+            // （越舊、越該優先被回收）。如果拿掉 orderBy: { expiresAt: 'asc' }，
+            // 沒有其他排序線索時 Postgres 對小表通常照插入順序（heap scan）
+            // 回傳，此時「前 batchSize 筆」會是插入順序最前面、也就是最新
+            // 的幾筆，跟下面斷言預期的「最舊優先」矛盾，藉此讓拿掉 orderBy
+            // 這件事真的會被測出來（插入序＝到期序時，拿掉 orderBy 也可能
+            // 剛好照樣通過，就沒有鑑別力）。
             created.push(
-                await createOrder(new Date(Date.now() - (100000 - i * 1000)))
+                await createOrder(new Date(Date.now() - (i + 1) * 1000))
             );
         }
 
@@ -324,13 +337,13 @@ describe('orderExpiry worker', () => {
             )
         );
 
-        // orderBy: asc 應該優先處理「最舊」的 batchSize 筆，而非任意順序的 batchSize 筆
-        expect(
-            statuses.slice(0, batchSize).every((o) => o?.status === 'expired')
-        ).toBe(true);
-        expect(
-            statuses.slice(batchSize).every((o) => o?.status === 'pending')
-        ).toBe(true);
+        // 插入順序的「最後 batchSize 筆」才是真正最舊（expiresAt 最早）的，
+        // orderBy: asc 應該優先處理它們；「最前面」的幾筆則是最新、還沒輪到
+        const oldest = statuses.slice(total - batchSize);
+        const newest = statuses.slice(0, total - batchSize);
+
+        expect(oldest.every((o) => o?.status === 'expired')).toBe(true);
+        expect(newest.every((o) => o?.status === 'pending')).toBe(true);
 
         const second = await expireOverdueOrders(batchSize);
         expect(second).toBe(2);
