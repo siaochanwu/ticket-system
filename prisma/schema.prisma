@@ -70,6 +70,18 @@ model Payment {
 }
 
 // 退票申請
+//
+// 注意：refund_requests(order_id) 上還有一個 partial unique index
+// （refund_requests_order_id_pending_approved_key，
+// WHERE status IN ('pending', 'approved')），確保同一張訂單同時只能有
+// 一筆 pending/approved 的退票申請（rejected 允許重新申請，不受限）。
+// Prisma schema 語法不支援 partial index 的 WHERE 子句，這個 index
+// 只存在於 migration.sql（見
+// prisma/migrations/*_refund_request_pending_approved_unique），
+// 對 schema.prisma 本身不可見。未來若跑 `prisma migrate dev` 偵測到這個
+// 「多餘」的 index 並想產生 DROP，千萬不要接受——這是 createRefundRequest
+// 併發防護的唯一 DB 層防線（同一模式見 Payment 的
+// payments_order_id_pending_key）。
 model RefundRequest {
   id          String    @id @default(uuid())
   orderId     String    @map("order_id")

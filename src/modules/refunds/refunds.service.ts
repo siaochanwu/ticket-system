@@ -61,17 +61,35 @@ export async function createRefundRequest(
         throw Errors.REFUND_DEADLINE_PASSED;
     }
 
-    const refund = await prisma.refundRequest.create({
-        data: {
-            orderId,
-            userId,
-            reason,
-            status: 'pending',
-        },
-        include: refundInclude,
-    });
+    // 上面的 findFirst 只是先做一次友善的檢查，不是唯一防線：兩個併發請求
+    // 都可能通過「沒有既有 pending/approved 申請」的檢查後同時 create。
+    // 真正的守衛是 refund_requests(order_id) 上的 partial unique index
+    // （WHERE status IN ('pending','approved')，見 prisma/schema.prisma
+    // 的說明與對應 migration），輸家在這裡會撞上 P2002，同一模式見
+    // payments.service.ts 的 createPayment。
+    try {
+        const refund = await prisma.refundRequest.create({
+            data: {
+                orderId,
+                userId,
+                reason,
+                status: 'pending',
+            },
+            include: refundInclude,
+        });
 
-    return toRefundResponse(refund);
+        return toRefundResponse(refund);
+    } catch (error) {
+        const isUniqueViolation =
+            error instanceof Prisma.PrismaClientKnownRequestError &&
+            error.code === 'P2002';
+
+        if (!isUniqueViolation) {
+            throw error;
+        }
+
+        throw Errors.REFUND_ALREADY_REQUESTED;
+    }
 }
 
 export async function getMyRefundRequests(
