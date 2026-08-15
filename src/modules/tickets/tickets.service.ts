@@ -71,6 +71,15 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
         );
     }
 
+    // 2.5 檢查座位 DB 狀態（Redis 鎖可能已過期，DB 才是最終真相）
+    const unavailable = seats.filter((seat) => seat.status !== 'available');
+    if (unavailable.length > 0) {
+        // locked 表示他人選位／下單中，sold 等其他狀態表示已無法購買，分開回報
+        throw unavailable.every((seat) => seat.status === 'locked')
+            ? Errors.SEAT_LOCKED
+            : Errors.SEAT_NOT_AVAILABLE;
+    }
+
     // 3. 檢查購買上限 (在同一票種時檢查)
     if (seats.length > 0 && seatIds.length > seats[0].ticketType.maxPerOrder) {
         throw Errors.EXCEED_LIMIT;
@@ -101,30 +110,68 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
             if (!locked) {
                 // 鎖定失敗，檢查是否是自己鎖的
                 const existing = await redis.get(lockKey);
-                if (existing) {
-                    const data = JSON.parse(existing);
-                    if (data.userId !== userId) {
-                        // 別人鎖的，回滾已鎖定的座位
-                        throw Errors.SEAT_LOCKED;
-                    }
+                if (!existing) {
+                    // 鎖在兩次呼叫之間過期，視為競爭失敗
+                    throw Errors.SEAT_LOCKED;
                 }
+
+                const data = JSON.parse(existing);
+                if (data.userId !== userId) {
+                    // 別人鎖的，回滾已鎖定的座位
+                    throw Errors.SEAT_LOCKED;
+                }
+
+                // 自己鎖的：換成這次的 lockId 並延長，同時納入 DB 更新範圍
+                await redis.set(
+                    lockKey,
+                    JSON.stringify({ lockId, userId, sessionId }),
+                    'EX',
+                    LOCK_DURATION
+                );
+                lockedSeats.push(seat.id);
             } else {
                 lockedSeats.push(seat.id);
             }
         }
-        // 5. 更新資料庫座位狀態
-        await prisma.seat.updateMany({
-            where: {
-                id: {
-                    in: lockedSeats,
+        // 5. 更新資料庫座位狀態（只在仍為 available 時更新，避免覆寫他人鎖定）
+        //    updateMany 本身只保證單一 SQL 陳述式的原子性，不保證「全部座位都更新成功」；
+        //    把它與筆數比對包進交易，count 不符時拋錯讓交易整批回滾，避免部分座位卡在 locked 卻無人能回收
+        await prisma.$transaction(async (tx) => {
+            const updated = await tx.seat.updateMany({
+                where: {
+                    id: {
+                        in: lockedSeats,
+                    },
+                    status: 'available',
                 },
-            },
-            data: {
-                status: 'locked',
-                lockedBy: userId,
-                lockedUntil: expiresAt,
-            },
+                data: {
+                    status: 'locked',
+                    lockedBy: userId,
+                    lockedUntil: expiresAt,
+                },
+            });
+
+            if (updated.count !== lockedSeats.length) {
+                // 有座位在檢查與更新之間被搶走，拋錯讓交易回滾這次的 DB 寫入，
+                // 外層 catch 再回滾 Redis 鎖
+                throw Errors.SEAT_LOCKED;
+            }
         });
+
+        // 5.5 交易成功代表這批座位在 DB 上目前唯一的擁有者就是這次呼叫，
+        //     無條件把 Redis 鎖重新寫成自己的內容：
+        //     同一使用者的並發呼叫可能在「自己鎖的」分支覆寫過這把鎖，
+        //     若不在確認 DB 勝出後重新確立，Redis 鎖內容可能已經不是自己的，
+        //     使得回傳成功卻沒有對應的 Redis 鎖，違反不變式
+        for (const seatId of lockedSeats) {
+            await redis.set(
+                `seat:lock:${seatId}`,
+                JSON.stringify({ lockId, userId, sessionId }),
+                'EX',
+                LOCK_DURATION
+            );
+        }
+
         // 6. 儲存用戶鎖定資訊到 Redis
         const userLockKey = `user:locks:${userId}`;
         await redis.hset(
@@ -153,9 +200,17 @@ export async function lockSeats(input: LockSeatsInput): Promise<LockResult> {
             expiresAt: expiresAt,
         };
     } catch (error) {
-        // 回滾已鎖定的座位
+        // 回滾已鎖定的座位：比照 unlockSeats 的做法，讀出目前的值並比對
+        // lockId 才刪除，避免刪到並發呼叫（含自己）之後才建立/覆寫的鎖
         for (const seatId of lockedSeats) {
-            await redis.del(`seat:lock:${seatId}`);
+            const lockKey = `seat:lock:${seatId}`;
+            const existing = await redis.get(lockKey);
+            if (existing) {
+                const data = JSON.parse(existing);
+                if (data.userId === userId && data.lockId === lockId) {
+                    await redis.del(lockKey);
+                }
+            }
         }
         throw error;
     }
@@ -279,6 +334,19 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
 
     const { seatIds } = JSON.parse(lockData);
 
+    // 1.5 單次性原子宣告：HDEL 是原子操作且會回傳實際刪除的欄位數，
+    // 這裡與 createOrder 對同一個 lockId 競爭同一把 hash 欄位——
+    // 只有先搶到的那個能拿到 1，另一個拿到 0。拿到 0 代表這個 lockId
+    // 已經被另一次呼叫（多半是 createOrder）消費掉，必須視為「鎖不存在」
+    // 直接失敗，而不是繼續用剛剛讀到、可能已經過期的 lockData 去動座位。
+    // 這是 N2 的根源：DELETE /api/tickets/lock/:lockId 與
+    // POST /api/orders 若各自只用 hget 判斷，兩者可能都讀到刪除前的
+    // 同一筆記錄而各自認為自己合法持有這批座位。
+    const claimed = await redis.hdel(userLockKey, lockId);
+    if (claimed === 0) {
+        throw new AppError('找不到鎖定記錄', 404, 'LOCK_NOT_FOUND');
+    }
+
     // 2. 釋放 Redis 鎖
     for (const seatId of seatIds) {
         const lockKey = `seat:lock:${seatId}`;
@@ -293,13 +361,24 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
         }
     }
 
-    // 3. 更新資料庫
+    // 3. 更新資料庫：只釋放實際仍被本人以「選位中」狀態持有、且沒有任何
+    // pending/paid 訂單依附的座位。光加 status: 'locked' 不夠——座位一旦
+    // 被 createOrder 接手，status 仍然是 locked，唯一能分辨「還在選位」
+    // 跟「已經是訂單」的方式是這個關聯條件（與 orderExpiry.service.ts 的
+    // buildAbandonedSeatFilter 同一個道理）。上面的原子宣告已經讓正常的
+    // API 併發路徑不可能走到這裡還命中一張活訂單，這裡是第二道防線。
     await prisma.seat.updateMany({
         where: {
             id: {
                 in: seatIds,
             },
+            status: 'locked',
             lockedBy: userId,
+            orderItems: {
+                none: {
+                    order: { status: { in: ['pending', 'paid'] } },
+                },
+            },
         },
         data: {
             status: 'available',
@@ -307,9 +386,6 @@ export async function unlockSeats(input: UnlockSeatsInput): Promise<void> {
             lockedBy: null,
         },
     });
-
-    // 4. 移除用戶鎖定記錄
-    await redis.hdel(userLockKey, lockId);
 }
 
 // 取得用戶的鎖定座位

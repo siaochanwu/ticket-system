@@ -27,7 +27,7 @@ export const redisUtils = {
      * 取得庫存
      */
     async getStock(ticketTypeId: number): Promise<number> {
-        const stock = await redis.get(`inventory: ${ticketTypeId}`);
+        const stock = await redis.get(`inventory:${ticketTypeId}`);
         return parseInt(stock || '0', 10);
     },
 
@@ -35,7 +35,7 @@ export const redisUtils = {
      * 設定庫存
      */
     async setStock(ticketTypeId: number, quantity: number): Promise<void> {
-        await redis.set(`inventory: ${ticketTypeId}`, quantity);
+        await redis.set(`inventory:${ticketTypeId}`, quantity);
     },
 
     /**
@@ -46,7 +46,7 @@ export const redisUtils = {
         ticketTypeId: number,
         quantity: number
     ): Promise<number> {
-        const key = `inventory: ${ticketTypeId}`;
+        const key = `inventory:${ticketTypeId}`;
 
         // 使用 Lua Script 確保原子性
         const script = `
@@ -69,7 +69,7 @@ export const redisUtils = {
         ticketTypeId: number,
         quantity: number
     ): Promise<number> {
-        const key = `inventory: ${ticketTypeId}`;
+        const key = `inventory:${ticketTypeId}`;
         return await redis.incrby(key, quantity);
     },
 

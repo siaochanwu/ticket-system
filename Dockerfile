@@ -1,5 +1,5 @@
 # 構建階段
-FROM node:20-alpine AS build
+FROM node:24-alpine AS build
 
 WORKDIR /app
 
@@ -9,6 +9,10 @@ COPY prisma ./prisma/
 
 # 安裝依賴
 RUN npm ci
+
+# 安裝 Prisma 產生引擎所需的 openssl，確保產生的 engine binary target
+# 與執行階段的 openssl 版本一致（避免 node:24-alpine 缺少 openssl 而誤判為 1.1.x）
+RUN apk add --no-cache openssl
 
 # 複製其餘原始碼
 COPY . .
@@ -20,7 +24,7 @@ RUN npx prisma generate
 RUN npm run build
 
 # 執行階段
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 

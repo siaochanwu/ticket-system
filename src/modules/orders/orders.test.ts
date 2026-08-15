@@ -3,6 +3,8 @@ import { buildApp } from '../../app.js';
 import { FastifyInstance } from 'fastify';
 import prisma from '../../config/database.js';
 import redis, { closeRedis } from '../../config/redis.js';
+import config from '../../config/index.js';
+import { cancelOrder } from './orders.service.js';
 
 describe('Orders Module', () => {
     let app: FastifyInstance;
@@ -122,6 +124,13 @@ describe('Orders Module', () => {
             });
             const lockId = JSON.parse(lockRes.body).data.lockId;
 
+            // 刻意把選位鎖的 TTL 縮短，模擬「鎖快過期」的情境：
+            // 如果 createOrder 只是延長（expire）舊 TTL 而非主動重設，
+            // 這裡量到的殘餘 TTL 就會停留在很小的數字，測試就會抓到退化
+            const lockKey = `seat:lock:${seatIds[0]}`;
+            const shortenedTtl = 5;
+            await redis.expire(lockKey, shortenedTtl);
+
             // 2. 建立訂單
             const orderRes = await app.inject({
                 method: 'POST',
@@ -144,10 +153,16 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
-            const lockKey = `seat:lock:${seatIds[0]}`;
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在，
+            //    且 TTL 必須被 createOrder 主動重設回付款期限附近
+            //   （遠大於我們剛剛人為縮短的 5 秒，證明不是單純殘留的舊 TTL）
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
+            const ttl = await redis.ttl(lockKey);
+            expect(ttl).toBeGreaterThan(shortenedTtl);
+            expect(ttl).toBeLessThanOrEqual(
+                config.order.paymentTimeoutMinutes * 60
+            );
         });
 
         it('鎖定過期後建立訂單應該失敗', async () => {
@@ -162,6 +177,42 @@ describe('Orders Module', () => {
             expect(response.statusCode).toBe(400);
             const body = JSON.parse(response.body);
             expect(body.code).toBe('LOCK_EXPIRED');
+        });
+
+        it('建立訂單時應該把座位的 lockedUntil 同步延長到訂單的付款期限（回歸測試）', async () => {
+            // 1. 先鎖定座位
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            // 2. 建立訂單
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            const dbOrder = await prisma.order.findUnique({
+                where: { id: orderId },
+            });
+            const dbSeat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+
+            // 必須精確等於訂單的付款期限，而不只是「還沒過期」——
+            // 選位當下寫入的舊 lockedUntil（10 分鐘後）若測試跑得夠快，
+            // 此時也還沒過期，用「還沒過期」這種寬鬆斷言會漏掉
+            // createOrder 忘記同步這個欄位的迴歸（見 Task 3 re-review 第 2 點）
+            expect(dbSeat?.lockedUntil).not.toBeNull();
+            expect(dbSeat?.lockedUntil?.getTime()).toBe(
+                dbOrder?.expiresAt.getTime()
+            );
         });
     })
 
@@ -198,10 +249,10 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
             const lockKey = `seat:lock:${seatIds[0]}`;
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
 
             // 5. 取得訂單列表
             const getRes = await app.inject({
@@ -263,10 +314,10 @@ describe('Orders Module', () => {
             expect(dbOrder).toBeDefined();
             expect(dbOrder?.items.length).toBe(1);
 
-            // 4. 檢查 Redis 鎖定是否已清除
+            // 4. 訂單 pending 期間，Redis 座位鎖必須仍存在
             const lockKey = `seat:lock:${seatIds[0]}`;
             const exists = await redis.exists(lockKey);
-            expect(exists).toBe(0);
+            expect(exists).toBe(1);
 
             // 5. 取得訂單明細
             const orderId = body.data.id;
@@ -286,5 +337,321 @@ describe('Orders Module', () => {
         })
     })
 
+    describe('POST /api/orders/:orderId/cancel', () => {
+        it('應該能取消 pending 訂單並釋放座位與 Redis 鎖', async () => {
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            const seat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+            expect(seat?.status).toBe('available');
+            expect(seat?.lockedBy).toBeNull();
+
+            const exists = await redis.exists(`seat:lock:${seatIds[0]}`);
+            expect(exists).toBe(0);
+        });
+
+        it('非 pending 的訂單不應該能取消', async () => {
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            const secondRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(secondRes.statusCode).toBe(400);
+            expect(JSON.parse(secondRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+        });
+
+        it('已付款訂單不應該能取消，且不得動到座位與票券（可兌現雙賣回歸測試）', async () => {
+            // 直接把資料組成「已付款」狀態：座位 sold、OrderItem 已簽發
+            // ticketCode/qrCode。比等待真正的付款流程更穩定地重現
+            // 「cancel 讀到 pending 之後、commit 之前剛好有付款成功」的後果。
+            const order = await prisma.order.create({
+                data: {
+                    orderNo: `TKT-PAID-${Date.now()}`,
+                    userId,
+                    sessionId,
+                    status: 'paid',
+                    totalAmount: 1000,
+                    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+                    paidAt: new Date(),
+                },
+            });
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            await prisma.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    seatId: seatIds[0],
+                    ticketTypeId,
+                    price: 1000,
+                    ticketCode: 'TIX-ALREADY-ISSUED',
+                    qrCode: 'QR-ALREADY-ISSUED',
+                },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${order.id}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(400);
+            expect(JSON.parse(cancelRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: order.id } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
+
+            const dbItem = await prisma.orderItem.findFirst({ where: { orderId: order.id } });
+            expect(dbItem?.ticketCode).not.toBeNull();
+            expect(dbItem?.qrCode).not.toBeNull();
+        });
+
+        it('讀取當下是 pending、交易前才被改成 paid 的取消也必須失敗（不能只靠交易外的前置檢查）', async () => {
+            // 先走正常流程建立一筆貨真價實的 pending 訂單，取得 orderId
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 在同一個測試內模擬「取消讀到 pending 之後、交易 commit 之前，
+            // 付款搶先 commit」：直接把它改成已付款
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            const orderItem = await prisma.orderItem.findFirstOrThrow({
+                where: { orderId },
+            });
+            await prisma.orderItem.update({
+                where: { id: orderItem.id },
+                data: { ticketCode: 'TIX-RACE', qrCode: 'QR-RACE' },
+            });
+            await prisma.order.update({
+                where: { id: orderId },
+                data: { status: 'paid', paidAt: new Date() },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(400);
+            expect(JSON.parse(cancelRes.body).code).toBe('ORDER_CANNOT_CANCEL');
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: orderId } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
+
+            const dbItem = await prisma.orderItem.findUnique({ where: { id: orderItem.id } });
+            expect(dbItem?.ticketCode).not.toBeNull();
+            expect(dbItem?.qrCode).not.toBeNull();
+        });
+
+        it('service 層 cancelOrder 必須靠交易內的 where 守衛擋下已付款訂單（拿掉守衛此測試必須變紅）', async () => {
+            // 繞過 HTTP 層，直接呼叫 service，確保守衛真的長在交易內部，
+            // 而不是恰好被前面某一層的前置檢查擋下
+            const order = await prisma.order.create({
+                data: {
+                    orderNo: `TKT-PAID-SVC-${Date.now()}`,
+                    userId,
+                    sessionId,
+                    status: 'pending',
+                    totalAmount: 1000,
+                    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+                },
+            });
+            await prisma.orderItem.create({
+                data: {
+                    orderId: order.id,
+                    seatId: seatIds[0],
+                    ticketTypeId,
+                    price: 1000,
+                },
+            });
+
+            // 呼叫 cancelOrder 之前才把訂單改成 paid（模擬讀取後才 commit 的付款）
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { status: 'sold', lockedBy: null, lockedUntil: null },
+            });
+            await prisma.orderItem.updateMany({
+                where: { orderId: order.id },
+                data: { ticketCode: 'TIX-SVC-DIRECT', qrCode: 'QR-SVC-DIRECT' },
+            });
+            await prisma.order.update({
+                where: { id: order.id },
+                data: { status: 'paid', paidAt: new Date() },
+            });
+
+            await expect(cancelOrder(userId, order.id)).rejects.toMatchObject({
+                code: 'ORDER_CANNOT_CANCEL',
+            });
+
+            const dbOrder = await prisma.order.findUnique({ where: { id: order.id } });
+            expect(dbOrder?.status).toBe('paid');
+
+            const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(dbSeat?.status).toBe('sold');
+        });
+
+        it('取消訂單時只能釋放屬於自己的座位鎖，不能連帶清掉已被別人重新鎖定的座位（座位守衛回歸測試）', async () => {
+            // 走正常流程建立一筆貨真價實的 pending 訂單，讓交易內的
+            // order-level 守衛順利通過——執行才會真的走到座位那一行，
+            // 而不是提早在訂單狀態就被擋下（見 Important A：三個舊測試
+            // 都在 order-level 就丟錯，從沒測到座位守衛本身）
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 模擬「這顆座位在交易之間已經被別的流程重新鎖給別人」：只改
+            // 座位的 lockedBy，訂單本身仍是貨真價實的 pending，讓 order-level
+            // 守衛通過、seat-level 守衛成為唯一能不能保護到這顆座位的關鍵
+            const foreignUserId = 'foreign-user-00000000-0000-0000-0000-000000000000';
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { lockedBy: foreignUserId },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            // 訂單本身沒有理由被擋下，仍然成功取消
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            // 但座位已經不屬於這張訂單的擁有者，這次取消不能動到它
+            const seat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(seat?.status).toBe('locked');
+            expect(seat?.lockedBy).toBe(foreignUserId);
+        });
+
+        it('取消訂單時只能刪除仍屬於自己的 Redis 座位鎖，不能連帶清掉已被別人合法取得的新鎖（Redis 守衛回歸測試）', async () => {
+            // 同樣先走正常流程建立貨真價實的 pending 訂單，讓 order-level
+            // 守衛通過、交易真的 commit，執行才會走到交易後的 Redis 清理
+            // （見 Important B：舊測試從沒有一個真的跑到 commit 之後那一段）
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 模擬「commit 之後、Redis 清理之前，這顆座位的鎖已經被別人的
+            // 新選位合法取走」：只改 Redis key 的內容，不動 DB 的座位或
+            // 訂單狀態——DB 端座位釋放與否不影響這裡要驗證的事
+            const lockKey = `seat:lock:${seatIds[0]}`;
+            const foreignLock = {
+                orderId: 'foreign-order-id',
+                userId: 'foreign-user-00000000-0000-0000-0000-000000000000',
+                sessionId,
+            };
+            await redis.set(lockKey, JSON.stringify(foreignLock), 'EX', 300);
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            // Redis 鎖已經屬於別人，這次取消不能刪除它
+            const exists = await redis.exists(lockKey);
+            expect(exists).toBe(1);
+            const raw = await redis.get(lockKey);
+            expect(JSON.parse(raw!)).toEqual(foreignLock);
+        });
+    });
 
 });

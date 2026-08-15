@@ -13,7 +13,11 @@ services:
       - DATABASE_URL=postgresql://tickets:tickets@postgres:5432/tickets
       - REDIS_URL=redis://redis:6379
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
-      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:?PAYMENT_MOCK_SECRET is required}
+      - PAYMENT_CALLBACK_BASE_URL=${PAYMENT_CALLBACK_BASE_URL:-http://localhost:3000}
+      - ORDER_PAYMENT_TIMEOUT_MINUTES=10
+      - REFUND_DEADLINE_DAYS=7
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,28 +38,31 @@ services:
   # ========================================
   # Background Workers
   # ========================================
-#  worker:
-#    build:
-#      context: .
-#      dockerfile: Dockerfile
-#    command: node src/workers/index.js
-#    environment:
-#      - NODE_ENV=production
-#      - DATABASE_URL=postgresql://tickets:tickets@postgres:5432/tickets
-#      - REDIS_URL=redis://redis:6379
-#      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
-#    depends_on:
-#      postgres:
-#        condition: service_healthy
-#      redis:
-#        condition: service_healthy
-#      rabbitmq:
-#        condition: service_healthy
-#    networks:
-#      - ticket-network
-#    restart: unless-stopped
-#    deploy:
-#      replicas: 2
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ['npm', 'run', 'worker:start']
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://tickets:tickets@postgres:5432/tickets
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - PAYMENT_MOCK_SECRET=${PAYMENT_MOCK_SECRET:?PAYMENT_MOCK_SECRET is required}
+      - ORDER_PAYMENT_TIMEOUT_MINUTES=10
+      - ORDER_EXPIRY_INTERVAL_MS=30000
+      - ORDER_EXPIRY_LOCK_TTL_SECONDS=25
+      - ORDER_EXPIRY_BATCH_SIZE=100
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ticket-network
+    restart: unless-stopped
+    deploy:
+      replicas: 2
 
   # ========================================
   # Nginx Load Balancer

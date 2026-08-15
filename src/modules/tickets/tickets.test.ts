@@ -123,6 +123,8 @@ describe('Tickets Module', () => {
     });
 
     async function cleanupTestData() {
+        await prisma.orderItem.deleteMany({});
+        await prisma.order.deleteMany({});
         await prisma.seat.deleteMany({});
         await prisma.ticketType.deleteMany({});
         await prisma.session.deleteMany({});
@@ -216,6 +218,119 @@ describe('Tickets Module', () => {
                 where: {
                     email: 'ticketuser2@example.com',
                 },
+            });
+        });
+
+        it('已被他人下單（pending 訂單）的座位不應該能再次鎖定', async () => {
+            // 使用者 1 鎖位並下單
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            expect(orderRes.statusCode).toBe(201);
+
+            // 下單後 Redis 座位鎖必須仍然存在（與 DB 狀態保持一致）
+            const stillLocked = await redis.exists(`seat:lock:${seatIds[0]}`);
+            expect(stillLocked).toBe(1);
+
+            // 使用者 2 嘗試鎖同一個座位
+            await app.inject({
+                method: 'POST',
+                url: '/api/auth/register',
+                payload: {
+                    email: 'ticketuser3@example.com',
+                    password: '12345678',
+                },
+            });
+            const login3 = await app.inject({
+                method: 'POST',
+                url: '/api/auth/login',
+                payload: {
+                    email: 'ticketuser3@example.com',
+                    password: '12345678',
+                },
+            });
+            const user3Token = JSON.parse(login3.body).data.token;
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${user3Token}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+
+            expect(response.statusCode).toBe(409);
+
+            // 座位仍屬於使用者 1，沒有被覆寫
+            const seat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+            expect(seat?.status).toBe('locked');
+            expect(seat?.lockedBy).toBe(userId);
+
+            await prisma.orderItem.deleteMany({});
+            await prisma.order.deleteMany({});
+            await prisma.user.deleteMany({
+                where: { email: 'ticketuser3@example.com' },
+            });
+        });
+
+        it('Redis 鎖已過期（手動模擬）但 DB 仍為 locked 的座位不應該能被鎖定', async () => {
+            // 使用者 1 鎖位（不下單，單純鎖位）
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+            expect(lockRes.statusCode).toBe(200);
+
+            // 手動刪除 Redis 鎖，模擬鎖已自然過期，但 DB 座位狀態仍是 locked
+            // 這隔離出「只靠 DB 狀態守衛擋下」的場景：若把 lockSeats 的 2.5
+            // 守衛還原成只看 Redis，這個測試會因為使用者 4 拿到 200 而變紅
+            await redis.del(`seat:lock:${seatIds[0]}`);
+
+            await app.inject({
+                method: 'POST',
+                url: '/api/auth/register',
+                payload: {
+                    email: 'ticketuser4@example.com',
+                    password: '12345678',
+                },
+            });
+            const login4 = await app.inject({
+                method: 'POST',
+                url: '/api/auth/login',
+                payload: {
+                    email: 'ticketuser4@example.com',
+                    password: '12345678',
+                },
+            });
+            const user4Token = JSON.parse(login4.body).data.token;
+
+            const response = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${user4Token}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+
+            const body = JSON.parse(response.body);
+            expect(response.statusCode).toBe(409);
+            expect(body.code).toBe('SEAT_LOCKED');
+
+            await prisma.user.deleteMany({
+                where: { email: 'ticketuser4@example.com' },
             });
         });
 
@@ -494,6 +609,60 @@ describe('Tickets Module', () => {
 
             expect(response.statusCode).toBe(404);
             expect(body.code).toBe('LOCK_NOT_FOUND');
+        });
+
+        it('user:locks 記錄若在下單後被重新植入，不應該釋放已被 pending 訂單持有的座位（N2 回歸測試）', async () => {
+            // 使用者鎖位並下單：createOrder 現在會用原子 HDEL 搶先消費掉
+            // 這筆 user:locks 記錄
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds: [seatIds[0]] },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            expect(orderRes.statusCode).toBe(201);
+
+            // 手動把這筆已經被消費掉的 user:locks 記錄植回去，模擬 N2
+            // 描述的競態情境：unlockSeats 若只靠 hget 判斷，會誤以為
+            // 自己仍合法持有這批座位（此刻座位其實已經是一張 pending
+            // 訂單的一部分）
+            const userLockKey = `user:locks:${userId}`;
+            await redis.hset(
+                userLockKey,
+                lockId,
+                JSON.stringify({
+                    sessionId,
+                    seatIds: [seatIds[0]],
+                    expiresAt: new Date(Date.now() + 600000).toISOString(),
+                })
+            );
+
+            const response = await app.inject({
+                method: 'DELETE',
+                url: `/api/tickets/lock/${lockId}`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            // 原子宣告本身會成功（手動植回了記錄，HDEL 拿得到 1），
+            // 但座位層的關聯守衛必須擋下實際的 DB 寫入
+            expect(response.statusCode).toBe(200);
+
+            const seat = await prisma.seat.findUnique({
+                where: { id: seatIds[0] },
+            });
+            expect(seat?.status).toBe('locked');
+            expect(seat?.lockedBy).toBe(userId);
+
+            await prisma.orderItem.deleteMany({});
+            await prisma.order.deleteMany({});
         });
     });
 

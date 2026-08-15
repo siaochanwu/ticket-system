@@ -13,16 +13,16 @@ datasource db {
 
 // 使用者
 model User {
-  id           String    @id @default(uuid())
-  email        String    @unique
-  passwordHash String    @map("password_hash")
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
   phone        String?
-  realName     String?   @map("real_name")
-  idCard       String?   @map("id_card")
-  isVerified   Boolean   @default(false) @map("is_verified")
-  role         String    @default("USER")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  realName     String?  @map("real_name")
+  idCard       String?  @map("id_card")
+  isVerified   Boolean  @default(false) @map("is_verified")
+  role         String   @default("USER")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   orders         Order[]
   refundRequests RefundRequest[]
@@ -43,20 +43,32 @@ model Order {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
-  user     User        @relation(fields: [userId], references: [id])
-  session  Session     @relation(fields: [sessionId], references: [id])
-  items    OrderItem[]
-  payments Payment[]
+  user           User            @relation(fields: [userId], references: [id])
+  session        Session         @relation(fields: [sessionId], references: [id])
+  items          OrderItem[]
+  payments       Payment[]
+  refundRequests RefundRequest[]
 
   @@map("orders")
 }
 
 // 付款記錄
+//
+// 注意：payments(order_id) 上還有一個 partial unique index
+// （payments_order_id_pending_key，WHERE status = 'pending'），確保同一張
+// 訂單同時只能有一筆 pending 的付款記錄。Prisma schema 語法不支援 partial
+// index 的 WHERE 子句，這個 index 只存在於 migration.sql（見
+// prisma/migrations/20260815040034_payment_transaction_id_unique），
+// 對 schema.prisma 本身不可見。未來若跑 `prisma migrate dev` 偵測到這個
+// 「多餘」的 index 並想產生 DROP，千萬不要接受——這是 createPayment
+// 併發防護的唯一 DB 層防線
+// （同一模式見 RefundRequest 的
+// refund_requests_order_id_pending_approved_key）。
 model Payment {
   id            String   @id @default(uuid())
   orderId       String   @map("order_id")
   paymentMethod String?  @map("payment_method")
-  transactionId String?  @map("transaction_id")
+  transactionId String?  @unique @map("transaction_id")
   amount        Decimal  @db.Decimal(10, 2)
   status        String   @default("pending")
   rawResponse   Json?    @map("raw_response")
@@ -69,6 +81,18 @@ model Payment {
 }
 
 // 退票申請
+//
+// 注意：refund_requests(order_id) 上還有一個 partial unique index
+// （refund_requests_order_id_pending_approved_key，
+// WHERE status IN ('pending', 'approved')），確保同一張訂單同時只能有
+// 一筆 pending/approved 的退票申請（rejected 允許重新申請，不受限）。
+// Prisma schema 語法不支援 partial index 的 WHERE 子句，這個 index
+// 只存在於 migration.sql（見
+// prisma/migrations/*_refund_request_pending_approved_unique），
+// 對 schema.prisma 本身不可見。未來若跑 `prisma migrate dev` 偵測到這個
+// 「多餘」的 index 並想產生 DROP，千萬不要接受——這是 createRefundRequest
+// 併發防護的唯一 DB 層防線（同一模式見 Payment 的
+// payments_order_id_pending_key）。
 model RefundRequest {
   id          String    @id @default(uuid())
   orderId     String    @map("order_id")
@@ -79,7 +103,8 @@ model RefundRequest {
   processedBy String?   @map("processed_by")
   createdAt   DateTime  @default(now()) @map("created_at")
 
-  user User @relation(fields: [userId], references: [id])
+  order Order @relation(fields: [orderId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
 
   @@map("refund_requests")
 }
@@ -164,7 +189,7 @@ model OrderItem {
   seatId       Int      @map("seat_id")
   ticketTypeId Int      @map("ticket_type_id")
   price        Decimal  @db.Decimal(10, 2)
-  ticketCode   String?  @map("ticket_code")
+  ticketCode   String?  @unique @map("ticket_code")
   qrCode       String?  @map("qr_code")
   createdAt    DateTime @default(now()) @map("created_at")
 

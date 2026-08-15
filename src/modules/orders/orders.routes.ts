@@ -95,7 +95,7 @@ export default async function ordersRoutes(app: FastifyInstance) {
         },
     })
 
-    app.put('/:orderId', {
+    app.post('/:orderId/cancel', {
         onRequest: [app.authenticate],
         schema: {
             tags: ['orders'],
