@@ -559,6 +559,99 @@ describe('Orders Module', () => {
             const dbSeat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
             expect(dbSeat?.status).toBe('sold');
         });
+
+        it('取消訂單時只能釋放屬於自己的座位鎖，不能連帶清掉已被別人重新鎖定的座位（座位守衛回歸測試）', async () => {
+            // 走正常流程建立一筆貨真價實的 pending 訂單，讓交易內的
+            // order-level 守衛順利通過——執行才會真的走到座位那一行，
+            // 而不是提早在訂單狀態就被擋下（見 Important A：三個舊測試
+            // 都在 order-level 就丟錯，從沒測到座位守衛本身）
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 模擬「這顆座位在交易之間已經被別的流程重新鎖給別人」：只改
+            // 座位的 lockedBy，訂單本身仍是貨真價實的 pending，讓 order-level
+            // 守衛通過、seat-level 守衛成為唯一能不能保護到這顆座位的關鍵
+            const foreignUserId = 'foreign-user-00000000-0000-0000-0000-000000000000';
+            await prisma.seat.update({
+                where: { id: seatIds[0] },
+                data: { lockedBy: foreignUserId },
+            });
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            // 訂單本身沒有理由被擋下，仍然成功取消
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            // 但座位已經不屬於這張訂單的擁有者，這次取消不能動到它
+            const seat = await prisma.seat.findUnique({ where: { id: seatIds[0] } });
+            expect(seat?.status).toBe('locked');
+            expect(seat?.lockedBy).toBe(foreignUserId);
+        });
+
+        it('取消訂單時只能刪除仍屬於自己的 Redis 座位鎖，不能連帶清掉已被別人合法取得的新鎖（Redis 守衛回歸測試）', async () => {
+            // 同樣先走正常流程建立貨真價實的 pending 訂單，讓 order-level
+            // 守衛通過、交易真的 commit，執行才會走到交易後的 Redis 清理
+            // （見 Important B：舊測試從沒有一個真的跑到 commit 之後那一段）
+            const lockRes = await app.inject({
+                method: 'POST',
+                url: '/api/tickets/lock',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { sessionId, seatIds },
+            });
+            const lockId = JSON.parse(lockRes.body).data.lockId;
+
+            const orderRes = await app.inject({
+                method: 'POST',
+                url: '/api/orders',
+                headers: { Authorization: `Bearer ${userToken}` },
+                payload: { lockId },
+            });
+            const orderId = JSON.parse(orderRes.body).data.id;
+
+            // 模擬「commit 之後、Redis 清理之前，這顆座位的鎖已經被別人的
+            // 新選位合法取走」：只改 Redis key 的內容，不動 DB 的座位或
+            // 訂單狀態——DB 端座位釋放與否不影響這裡要驗證的事
+            const lockKey = `seat:lock:${seatIds[0]}`;
+            const foreignLock = {
+                orderId: 'foreign-order-id',
+                userId: 'foreign-user-00000000-0000-0000-0000-000000000000',
+                sessionId,
+            };
+            await redis.set(lockKey, JSON.stringify(foreignLock), 'EX', 300);
+
+            const cancelRes = await app.inject({
+                method: 'POST',
+                url: `/api/orders/${orderId}/cancel`,
+                headers: { Authorization: `Bearer ${userToken}` },
+            });
+
+            expect(cancelRes.statusCode).toBe(200);
+            expect(JSON.parse(cancelRes.body).data.status).toBe('cancelled');
+
+            // Redis 鎖已經屬於別人，這次取消不能刪除它
+            const exists = await redis.exists(lockKey);
+            expect(exists).toBe(1);
+            const raw = await redis.get(lockKey);
+            expect(JSON.parse(raw!)).toEqual(foreignLock);
+        });
     });
 
 });
